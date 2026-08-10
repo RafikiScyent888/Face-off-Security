@@ -188,7 +188,7 @@ FirebaseTransport.prototype = {
       self.A = m[0]; self.D = m[1];
       self.appRef = self.A.initializeApp(FB.config);
       self.db = self.D.getDatabase(self.appRef);
-      self.base = 'rooms/' + self.room;
+      self.base = 'rooms/sec-' + self.room;
     });
     return this._p;
   },
@@ -228,12 +228,45 @@ FirebaseTransport.prototype = {
   }
 };
 
+/* Checks firebase-config.js for the mistakes that actually happen, and
+   explains them in plain English instead of dying in the console. */
+function fbConfigProblem() {
+  if (!FB.enabled) return null;                       // Local Mode on purpose
+  var c = FB.config || {};
+  if (!c.apiKey || String(c.apiKey).indexOf('PASTE') === 0) {
+    return 'Firebase is turned on, but the apiKey in firebase-config.js is still the placeholder text.';
+  }
+  if (!c.databaseURL) {
+    return 'Firebase is turned on, but firebase-config.js has no <b>databaseURL</b>. ' +
+           'Firebase only puts that line in your config once a Realtime Database exists. ' +
+           'In the Firebase console go to <b>Build → Realtime Database → Create Database</b> ' +
+           '(Realtime Database, NOT Firestore), then copy the URL it shows and add it to the config.';
+  }
+  if (!/firebaseio\.com|firebasedatabase\.app/.test(String(c.databaseURL))) {
+    return 'The <b>databaseURL</b> in firebase-config.js doesn\'t look like a Realtime Database address. ' +
+           'It should end in <span class="mono">firebaseio.com</span> or <span class="mono">firebasedatabase.app</span>.';
+  }
+  return null;
+}
+var FB_PROBLEM = fbConfigProblem();
+var FB_RUNTIME_ERROR = null;
+
 function makeTransport(room) {
-  var useFB = FB.enabled && FB.config && FB.config.apiKey && FB.config.apiKey.indexOf('PASTE') !== 0;
-  return useFB ? new FirebaseTransport(room) : new LocalTransport(room);
+  return liveMode() ? new FirebaseTransport(room) : new LocalTransport(room);
 }
 function liveMode() {
-  return FB.enabled && FB.config && FB.config.apiKey && FB.config.apiKey.indexOf('PASTE') !== 0;
+  /* a broken config falls back to Local Mode so the class still runs */
+  return !!FB.enabled && !FB_PROBLEM;
+}
+
+/* persistent, dismissible explanation — not a toast that vanishes */
+function fbBanner() {
+  var msg = FB_RUNTIME_ERROR || FB_PROBLEM;
+  if (!msg) return '';
+  return '<div class="fbwarn"><div class="ic">⚠</div><div><b>Students can\'t join from their phones — ' +
+    'the game fell back to Local Mode.</b><br>' + msg +
+    '<br><span style="opacity:.75">Everything else still works: run it off the projector and use the ' +
+    'number keys to buzz for each team.</span></div></div>';
 }
 
 /* ------------------------------------------------------------------ */
@@ -938,7 +971,7 @@ function Host(forcedCode) {
   function lobbyView() {
     var joinUrl = location.origin + location.pathname + '#/play/' + S.room;
     var total = S.teams.reduce(function (a, t) { return a + t.members.length; }, 0);
-    return '<div class="wrap"><div class="lobbygrid">' +
+    return '<div class="wrap">' + fbBanner() + '<div class="lobbygrid">' +
       '<div class="card joinbox">' +
         '<div style="font-size:12px;letter-spacing:.2em;text-transform:uppercase;opacity:.75">Scan to join</div>' +
         '<div class="qr" id="qr"></div>' +
@@ -1402,7 +1435,11 @@ function Host(forcedCode) {
   document.addEventListener('keydown', onKey);
 
   T.hostInit(onAction).then(sync, function (err) {
-    flash('Connection error — see console', 'bad'); console.error(err); render();
+    console.error(err);
+    FB_RUNTIME_ERROR = 'Couldn\'t reach Firebase. Either the network is blocking ' +
+      '<span class="mono">*.firebaseio.com</span> / <span class="mono">gstatic.com</span>, ' +
+      'or the database rules deny access. Details are in the browser console (F12).';
+    S.phase = 'lobby'; render();
   });
   sync();
   window.__FO_HOST = S;          // exposed for automated testing
@@ -1714,6 +1751,8 @@ function Player(code, seat) {
     if (!P) {
       app.innerHTML = '<div class="play"><div class="card" style="text-align:center">' +
         '<div class="brand" style="justify-content:center"><div class="mark">⚔</div><div><div class="t1">FACE-OFF</div><div class="t2">SECURITY+</div></div></div>' +
+        (FB_PROBLEM ? '<div class="fbwarn" style="text-align:left;margin:14px 0"><div class="ic">⚠</div><div>' +
+          'This game isn\'t set up for phone joining yet — ask your instructor.</div></div>' : '') +
         '<h3 style="margin:18px 0 6px">Looking for room <span class="mono">' + esc(code) + '</span>…</h3>' +
         '<div class="hint">Make sure your instructor has the host screen open.' +
         (liveMode() ? '' : '<br><br><b>Local mode:</b> this join link only works in another tab on the host computer.') + '</div>' +
