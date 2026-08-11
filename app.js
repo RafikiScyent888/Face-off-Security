@@ -178,6 +178,15 @@ LocalTransport.prototype = {
 function FirebaseTransport(room) { this.room = room; }
 FirebaseTransport.prototype = {
   name: 'firebase',
+
+  /* rooms/<game->CODE — namespaced so five games can share one project */
+  _basePath: function () { return 'rooms/sec-' + this.room; },
+
+  /* REST endpoint for a node, used when the SDK can't be loaded */
+  _url: function (p) {
+    return String(FB.config.databaseURL).replace(/\/+$/, '') + '/' + this._basePath() + p + '.json';
+  },
+
   _load: function () {
     if (this._p) return this._p;
     var self = this;
@@ -185,46 +194,126 @@ FirebaseTransport.prototype = {
       import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'),
       import('https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js')
     ]).then(function (m) {
+      self.mode = 'sdk';
       self.A = m[0]; self.D = m[1];
       self.appRef = self.A.initializeApp(FB.config);
       self.db = self.D.getDatabase(self.appRef);
-      self.base = 'rooms/sec-' + self.room;
+      self.base = self._basePath();
+    }).catch(function (err) {
+      /* gstatic blocked (very common on school wi-fi). The database itself
+         is usually still reachable over plain REST on its own domain. */
+      console.warn('Firebase SDK could not load, falling back to REST:', err);
+      return fetch(self._url('/meta'), { cache: 'no-store' }).then(function (r) {
+        if (!r.ok) throw new Error('REST reachability check failed: ' + r.status);
+        self.mode = 'rest';
+        self.base = self._basePath();
+        FB_FELL_BACK = true;
+      });
     });
     return this._p;
   },
+
+  _get: function (p) {
+    return fetch(this._url(p) + '?t=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; });
+  },
+  _put: function (p, v) {
+    return fetch(this._url(p), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(v)
+    }).catch(function () {});
+  },
+  _post: function (p, v) {
+    return fetch(this._url(p), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(v)
+    }).catch(function () {});
+  },
+  _del: function (p) {
+    return fetch(this._url(p), { method: 'DELETE' }).catch(function () {});
+  },
+
+  /* poll a node and fire cb whenever its contents change */
+  _watch: function (p, cb, ms) {
+    var self = this, last = null;
+    var tick = function () {
+      self._get(p).then(function (v) {
+        if (v == null) return;
+        var s = JSON.stringify(v);
+        if (s !== last) { last = s; cb(v); }
+      });
+    };
+    tick();
+    setInterval(tick, ms || 900);
+  },
+
   hostInit: function (onAction) {
     var self = this;
     return this._load().then(function () {
-      var D = self.D;
-      return D.set(D.ref(self.db, self.base + '/actions'), null).then(function () {
-        D.onChildAdded(D.ref(self.db, self.base + '/actions'), function (snap) {
-          var v = snap.val();
-          D.remove(snap.ref);
-          if (v) onAction(v);
+      if (self.mode === 'sdk') {
+        var D = self.D;
+        return D.set(D.ref(self.db, self.base + '/actions'), null).then(function () {
+          D.onChildAdded(D.ref(self.db, self.base + '/actions'), function (snap) {
+            var v = snap.val();
+            D.remove(snap.ref);
+            if (v) onAction(v);
+          });
+          D.set(D.ref(self.db, self.base + '/meta'), { created: Date.now() });
         });
-        D.set(D.ref(self.db, self.base + '/meta'), { created: Date.now() });
+      }
+      /* REST: clear the queue, then drain it on a short poll */
+      return self._del('/actions').then(function () {
+        self._put('/meta', { created: Date.now() });
+        setInterval(function () {
+          self._get('/actions').then(function (kids) {
+            if (!kids) return;
+            Object.keys(kids).forEach(function (k) {
+              self._del('/actions/' + k);
+              if (kids[k]) onAction(kids[k]);
+            });
+          });
+        }, 700);
       });
     });
   },
+
   publish: function (pub) {
     var self = this;
-    this._load().then(function () { self.D.set(self.D.ref(self.db, self.base + '/pub'), pub); });
+    this._load().then(function () {
+      if (self.mode === 'sdk') self.D.set(self.D.ref(self.db, self.base + '/pub'), pub);
+      else self._put('/pub', pub);
+    });
   },
+
   publishTimer: function (t) {
     var self = this;
-    this._load().then(function () { self.D.set(self.D.ref(self.db, self.base + '/timer'), t); });
+    this._load().then(function () {
+      if (self.mode === 'sdk') self.D.set(self.D.ref(self.db, self.base + '/timer'), t);
+      else self._put('/timer', t);
+    });
   },
+
   playerInit: function (onPub, onTimer) {
     var self = this;
     return this._load().then(function () {
-      var D = self.D;
-      D.onValue(D.ref(self.db, self.base + '/pub'), function (s) { if (s.val()) onPub(s.val()); });
-      D.onValue(D.ref(self.db, self.base + '/timer'), function (s) { if (s.val()) onTimer(s.val()); });
+      if (self.mode === 'sdk') {
+        var D = self.D;
+        D.onValue(D.ref(self.db, self.base + '/pub'), function (s) { if (s.val()) onPub(s.val()); });
+        D.onValue(D.ref(self.db, self.base + '/timer'), function (s) { if (s.val()) onTimer(s.val()); });
+        return;
+      }
+      self._watch('/pub', onPub, 900);
+      self._watch('/timer', onTimer, 900);
     });
   },
+
   send: function (a) {
     var self = this;
-    this._load().then(function () { self.D.push(self.D.ref(self.db, self.base + '/actions'), a); });
+    this._load().then(function () {
+      if (self.mode === 'sdk') self.D.push(self.D.ref(self.db, self.base + '/actions'), a);
+      else self._post('/actions', a);
+    });
   }
 };
 
@@ -251,6 +340,7 @@ function fbConfigProblem() {
 var FB_PROBLEM = fbConfigProblem();
 var FB_RUNTIME_ERROR = null;
 var PLAYER_STALLED = false;
+var FB_FELL_BACK = false;
 
 function makeTransport(room) {
   return liveMode() ? new FirebaseTransport(room) : new LocalTransport(room);
