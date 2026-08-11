@@ -1598,7 +1598,23 @@ function Player(code, seat) {
     return Math.max(0, timer.endsAt - (Date.now() + timer.offset));
   }
 
-  function onPub(p) { P = p; render(); }
+  /* Firebase deletes empty arrays and objects on the way in, so a team with
+     nobody on it comes back with no `members` key, an all-empty board comes
+     back with no `alive`, and so on. Put back what the database dropped
+     before any view tries to read it. */
+  function normalizePub(p) {
+    if (!p) return p;
+    if (!p.teams) p.teams = [];
+    for (var i = 0; i < p.teams.length; i++) {
+      if (!p.teams[i]) p.teams[i] = {};
+      if (!p.teams[i].members) p.teams[i].members = [];
+    }
+    if (!p.alive) p.alive = [];
+    if (!p.buzzOrder) p.buzzOrder = [];
+    if (!p.lockedOut) p.lockedOut = [];
+    return p;
+  }
+  function onPub(p) { P = normalizePub(p); render(); }
   function onTimer(t) {
     timer.running = t.running;
     timer.endsAt = t.endsAt;
@@ -1637,11 +1653,12 @@ function Player(code, seat) {
       '<label class="fld" style="margin-top:16px">Your team</label>' +
       '<div class="slots">' + P.teams.map(function (t) {
         var cap = P.teamSize || 5;
-        var full = t.members.length >= cap && !t.members.some(function (m) { return m.id === me.memberId; });
+        var mem = t.members || [];
+        var full = mem.length >= cap && !mem.some(function (m) { return m.id === me.memberId; });
         return '<button class="slot' + (me.teamId === t.id ? ' sel' : '') + '" data-team="' + t.id + '"' + (full ? ' disabled' : '') + '>' +
           '<div class="bar" style="background:' + t.color + '"></div>' +
           '<div class="n">' + esc(t.name) + '</div>' +
-          '<div class="c">' + t.members.length + '/' + cap + (full ? ' · FULL' : '') + '</div></button>';
+          '<div class="c">' + mem.length + '/' + cap + (full ? ' · FULL' : '') + '</div></button>';
       }).join('') + '</div>' +
       '<button class="btn primary lg" data-act="join" style="width:100%;margin-top:18px">Join team</button></div>';
   }
