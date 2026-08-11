@@ -257,15 +257,39 @@ label.fld{display:block;font-size:12px;letter-spacing:.09em;text-transform:upper
 .pclass .prow b{font-size:15px}
 @media (max-width:1100px){ .clsgrid,.cutgrid.two{grid-template-columns:1fr} }
 
+/* short windows: tighten everything so the controls always fit */
+@media (max-height:820px){
+  .overlay{padding:12px 16px;gap:9px}
+  .subans{padding:10px 14px}
+  .hostans{padding:6px 11px;font-size:13.5px}
+  .hostans b{font-size:15px}
+  .queue{min-height:34px}
+  .overlay .scores{gap:5px}
+  .overlay .scard{padding:5px 8px}
+}
+@media (max-height:660px){
+  .overlay{padding:9px 13px;gap:6px}
+  .ovval{font-size:20px}
+  .subans{padding:7px 12px}
+  .overlay .btn.lg{padding:9px 15px;font-size:14px}
+  .hostans{padding:5px 10px;font-size:12.5px}
+  .queue{min-height:28px}
+}
+
 /* ---------- overlay / clue ---------- */
 .overlay{position:fixed;inset:0;z-index:60;background:linear-gradient(160deg,var(--royal-blue-deep),var(--royal-blue) 60%,var(--royal-blue-light));
-  display:flex;flex-direction:column;padding:20px;gap:14px;animation:fade .18s ease}
+  display:flex;flex-direction:column;padding:20px;gap:14px;animation:fade .18s ease;overflow:hidden}
+/* The clue is the ONLY thing allowed to give up space. Judge buttons, score
+   strip and answer key must stay on screen at any window height — display
+   scaling at 125/150% leaves far less room than it looks like it should. */
+.overlay > *{flex:0 0 auto}
 @keyframes fade{from{opacity:0}to{opacity:1}}
 .ovtop{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .ovcat{font-size:13px;letter-spacing:.2em;text-transform:uppercase;opacity:.8}
 .ovval{font-size:26px;font-weight:900;color:var(--royal-yellow)}
-.qbox{flex:1;display:grid;place-items:center;text-align:center;padding:10px}
-.qtext{font-size:clamp(24px,4.2vw,58px);font-weight:800;line-height:1.28;max-width:22ch;margin:0 auto}
+.qbox{flex:1 1 0;min-height:0;overflow:auto;display:grid;place-items:center;text-align:center;padding:10px}
+/* size against the SHORTER axis too, so tall clues shrink instead of overflow */
+.qtext{font-size:clamp(20px,min(4.2vw,7.2vh),58px);font-weight:800;line-height:1.26;max-width:min(30ch,100%);margin:0 auto}
 .abox{background:rgba(21,128,61,.22);border:1px solid var(--royal-green);border-radius:14px;padding:16px 20px;text-align:center}
 .abox .lbl{font-size:11px;letter-spacing:.2em;text-transform:uppercase;opacity:.75;margin-bottom:6px}
 .abox .txt{font-size:clamp(18px,2.6vw,30px);font-weight:800;line-height:1.35}
@@ -296,7 +320,7 @@ label.fld{display:block;font-size:12px;letter-spacing:.09em;text-transform:upper
 /* answer submitted */
 .subans{background:rgba(255,255,255,.1);border:1px solid var(--line);border-radius:14px;padding:16px 20px}
 .subans .who{font-size:11px;letter-spacing:.16em;text-transform:uppercase;opacity:.7;margin-bottom:6px}
-.subans .txt{font-size:clamp(20px,3vw,34px);font-weight:800;word-break:break-word}
+.subans .txt{font-size:clamp(17px,min(3vw,4.4vh),34px);font-weight:800;word-break:break-word}
 .subans.empty .txt{opacity:.4;font-weight:600;font-style:italic}
 
 /* daily double */
@@ -409,9 +433,9 @@ label.fld{display:block;font-size:12px;letter-spacing:.09em;text-transform:upper
 <div id="app"></div>
 <div id="flash-host"></div>
 
-<script src="questions-security.js"></script>
-<script src="firebase-config.js"></script>
-<script src="qr.js"></script>
-<script src="app.js"></script>
+<script src="questions-security.js?v=4"></script>
+<script src="firebase-config.js?v=4"></script>
+<script src="qr.js?v=4"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
