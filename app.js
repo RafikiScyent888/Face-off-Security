@@ -55,6 +55,16 @@ var COLORS = [
   { id: 'slate',  name: 'Slate',   hex: '#475569' }
 ];
 var MAX_TEAMS = 16, MAX_TEAM_SIZE = 8;
+var MAX_ROUNDS = 10;              /* ceiling on the head-to-head round picker */
+
+/* Every Face-Off game deploys to the same github.io origin, and localStorage
+   is keyed per ORIGIN, not per folder. Sharing one 'fo:host' key meant these
+   games trod on each other's saved settings — and now on each other's deck of
+   used clues, which would reset whichever game you were part way through
+   every time you opened another one. The Firebase room paths were already
+   namespaced this way; local storage now matches. */
+var GAME_ID  = 'sec';
+var HOST_KEY = 'fo:host:' + GAME_ID;
 /* host-keyboard buzzers, in team order: 1-9, then 0, then - and = */
 var BUZZ_KEYS = ['1','2','3','4','5','6','7','8','9','0','-','=','q','w','e','r'];
 
@@ -128,10 +138,10 @@ function LocalTransport(room) {
   this.room = room;
   this.self = uid();
   this.seen = {};
-  try { this.ch = ('BroadcastChannel' in window) ? new BroadcastChannel('faceoff:' + room) : null; }
+  try { this.ch = ('BroadcastChannel' in window) ? new BroadcastChannel('faceoff:' + GAME_ID + ':' + room) : null; }
   catch (e) { this.ch = null; }
   this.bus = sharedBus();
-  this.kPub = 'fo:pub:' + room; this.kTim = 'fo:tim:' + room;
+  this.kPub = 'fo:pub:' + GAME_ID + ':' + room; this.kTim = 'fo:tim:' + GAME_ID + ':' + room;
 }
 LocalTransport.prototype = {
   name: 'local',
@@ -391,32 +401,95 @@ function trulyLevel(a, b) {
 }
 
 /* Solo bracket: cut to the last 2, who then face off.
-   Class vs class: cut each class down to 1, and those two champions face off. */
-function boardsNeeded(teams, classMode, aCount, bCount) {
+   Class vs class: cut each class down to 1, and those two champions face off.
+
+   Two teams is the exception. There is nobody to eliminate, so the bracket
+   can't decide the length for you — the host picks how many boards to play
+   before the head-to-head final. Every other team count is unchanged. */
+function isHeadToHead(teams, classMode) { return !classMode && teams === 2; }
+function boardsNeeded(teams, classMode, aCount, bCount, rounds) {
+  if (isHeadToHead(teams, classMode)) return Math.max(1, Math.min(MAX_ROUNDS, rounds || 1));
+  /* Duels knock out one team per matchup, so each class halves every round. */
   if (classMode) {
-    return Math.max(1, Math.ceil((Math.max(aCount, bCount) - 1) / 2));
+    return Math.max(1, Math.ceil(Math.log(Math.max(2, aCount, bCount)) / Math.log(2)));
   }
   return Math.max(1, Math.ceil((teams - 2) / 2));
 }
 function cutSize(alive) { return Math.max(0, Math.min(2, alive - 2)); }
 function classCutSize(aliveInClass) { return Math.max(0, Math.min(2, aliveInClass - 1)); }
 
-function newDeck() { return { used: {}, cursor: 0 }; }
+/* The deck remembers which clues have been used. It outlives a single
+   tournament on purpose: a class often plays two or three games back to
+   back, and a deck that reset each time served the same questions every
+   time. `fp` pins the memory to the question file it was built from, so
+   editing questions-security.js starts the memory over instead of pointing
+   stale indexes at different clues. */
+function poolFingerprint() {
+  return POOL.length + ':' + POOL.reduce(function (n, c) { return n + c.clues.length; }, 0);
+}
+function newDeck() {
+  var d = { used: {}, cursor: 0, drawn: 0, fp: poolFingerprint() };
+  reshuffleCategories(d);
+  return d;
+}
+function loadDeck(saved) {
+  if (!saved || saved.fp !== poolFingerprint() || !saved.used) return newDeck();
+  saved.drawn = saved.drawn || Object.keys(saved.used).length;
+  if (!saved.order || saved.order.length !== POOL.length) reshuffleCategories(saved);
+  return saved;
+}
+/* Categories came off the pool in file order, so every game opened on the
+   same four. Deal them in a fresh random order each tournament instead. */
+function reshuffleCategories(deck) {
+  deck.order = shuffled(POOL.map(function (_, i) { return i; }));
+  deck.cursor = 0;
+}
+function deckTotal() {
+  return POOL.reduce(function (n, c) { return n + c.clues.length; }, 0);
+}
+
+/* Pick one clue per row out of that row's slice of the category's difficulty
+   ramp. Clues are authored easiest-first, so with 5 rows band 0 is the
+   easiest fifth and band 4 the hardest: the column still climbs 100 to 500,
+   but which question fills each row changes from game to game. Taking the
+   first N unused clues, as this used to, meant a fresh deck always produced
+   the identical board. */
+function pickRows(deck, ci, total, nRows) {
+  var taken = {}, picks = [];
+  for (var row = 0; row < nRows; row++) {
+    var lo = Math.floor(row * total / nRows);
+    var hi = Math.max(lo + 1, Math.floor((row + 1) * total / nRows));
+    var band = [], any = [], k;
+    for (k = 0; k < total; k++) {
+      if (deck.used[ci + ':' + k] || taken[k]) continue;
+      any.push(k);
+      if (k >= lo && k < hi) band.push(k);
+    }
+    var from = band.length ? band : any;              // band spent — borrow anywhere
+    if (!from.length) return null;
+    var pick = from[Math.floor(Math.random() * from.length)];
+    taken[pick] = true;
+    picks.push(pick);
+  }
+  return picks.sort(function (a, b) { return a - b; });   // easy at the top of the column
+}
 
 /* Draw one board from the pool. Categories rotate round to round and no
-   clue is ever repeated inside a game. */
+   clue is ever repeated inside a game — or across games, until the pool
+   is genuinely spent. */
 function drawBoard(deck, nCats, nRows, mult, recycled) {
   if (!POOL.length) return [];
+  if (!deck.order || deck.order.length !== POOL.length) reshuffleCategories(deck);
   nCats = Math.min(nCats, POOL.length);
   var board = [], seen = 0;
   while (board.length < nCats && seen < POOL.length) {
-    var ci = deck.cursor % POOL.length;
+    var ci = deck.order[deck.cursor % deck.order.length];
     deck.cursor++; seen++;
-    var cat = POOL[ci], free = [];
-    for (var k = 0; k < cat.clues.length; k++) if (!deck.used[ci + ':' + k]) free.push(k);
-    if (free.length < nRows) continue;                    // this category is spent
-    var picks = free.slice(0, nRows);
+    var cat = POOL[ci];
+    var picks = pickRows(deck, ci, cat.clues.length, nRows);
+    if (!picks) continue;                                 // this category is spent
     picks.forEach(function (k) { deck.used[ci + ':' + k] = true; });
+    deck.drawn = (deck.drawn || 0) + picks.length;
     board.push({
       name: cat.name,
       clues: picks.map(function (k, row) {
@@ -427,7 +500,8 @@ function drawBoard(deck, nCats, nRows, mult, recycled) {
     });
   }
   if (board.length < nCats && !recycled) {                // pool ran dry mid-game
-    deck.used = {};
+    deck.used = {}; deck.drawn = 0;
+    reshuffleCategories(deck);
     return drawBoard(deck, nCats, nRows, mult, true);
   }
   placeDailyDoubles(board, (board.length * nRows) >= 20 ? 2 : 1);
@@ -507,22 +581,29 @@ function Launcher() {
 /* HOST                                                                */
 /* ================================================================== */
 function Host(forcedCode) {
-  var saved = lsGet('fo:host', null);
+  /* falls back to the old shared key once, so an existing host keeps their
+     settings the first time they load the namespaced build */
+  var saved = lsGet(HOST_KEY, null) || lsGet('fo:host', null);
   var S = {
     room: forcedCode || (saved && saved.room) || roomCode(),
     settings: Object.assign({
       teamCount: 8, teamSize: 5, answerSecs: 15, lightningSecs: 10,
       lengthMinutes: 60, minWager: 100, deduct: false, sound: true,
+      rounds: 1,          /* boards before the final — head-to-head games only */
       classMode: false, classA: 'CLASS A', classB: 'CLASS B'
     }, (saved && saved.settings) || {}),
     phase: 'lobby',
     teams: [],
-    deck: newDeck(),
+    deck: loadDeck(saved && saved.deck),
     tour: null,           /* set when the tournament starts */
     lightning: false,     /* true once the last two teams are heads-up */
     active: null, control: null,
     buzzOrder: [], lockedOut: [], current: null,
     answers: {}, reveal: false, ddWager: null,
+    /* the answer key stays covered on the host screen until the host asks
+       for it — a projector, a shoulder surfer or a screen share would
+       otherwise hand the room the answer the moment the clue opens */
+    hostPeek: false,
     timer: { running: false, endsAt: 0, total: 0 },
     settingsOpen: false
   };
@@ -567,14 +648,19 @@ function Host(forcedCode) {
     if (n <= 9) return '1-' + n;
     return '1-9 then ' + BUZZ_KEYS.slice(9, n).join(' ');
   }
-  function persist() { lsSet('fo:host', { room: S.room, settings: S.settings }); }
+  /* the deck rides along so used clues survive a reload, not just a new
+     tournament — a projector that gets refreshed mid-class shouldn't reset
+     the class back to question one */
+  function persist() { lsSet(HOST_KEY, { room: S.room, settings: S.settings, deck: S.deck }); }
 
   /* ---------- publish ---------- */
   function pubState() {
     var q = null;
     if (S.active && ['clue', 'answering', 'judge', 'ddclue', 'ddjudge', 'reveal'].indexOf(S.phase) >= 0) {
       q = { cat: S.active.cat, text: S.active.clue.q, value: S.active.value,
-            dd: !!S.active.clue.dd, lightning: !!S.lightning };
+            dd: !!S.active.clue.dd, lightning: !!S.lightning,
+            /* the only two teams allowed to buzz on this one */
+            duel: duelTeams() };
     }
     var answered = {};
     Object.keys(S.answers).forEach(function (k) { answered[k] = true; });
@@ -604,6 +690,8 @@ function Host(forcedCode) {
       lq: (S.lightning && T2) ? { asked: T2.lqAsked, total: T2.lqTotal } : null,
       cut: (S.phase === 'cut' && T2) ? T2.cut : null,
       classMode: S.settings.classMode,
+      pairs: (S.tour && S.tour.pairs) || [],
+      nextPair: duelsActive() ? nextPair() : null,
       classNames: { A: S.settings.classA, B: S.settings.classB },
       classTotals: { A: classTotal('A'), B: classTotal('B') },
       teamClass: S.teams.reduce(function (o, t) { o[t.id] = classOf(t); return o; }, {})
@@ -705,6 +793,7 @@ function Host(forcedCode) {
     if (S.phase !== 'clue') return;
     if (!team(teamId)) return;
     if (!isAlive(teamId)) return;                       // eliminated teams can't buzz
+    if (!inDuel(teamId)) return;                        // this clue belongs to another matchup
     if (S.lockedOut.indexOf(teamId) >= 0) return;
     if (S.buzzOrder.indexOf(teamId) >= 0) return;
     S.buzzOrder.push(teamId);
@@ -740,9 +829,26 @@ function Host(forcedCode) {
     if (!b[c] || !b[c].clues[i]) return;
     var cl = b[c].clues[i];
     if (cl.done) return;
-    S.active = { c: c, i: i, cat: b[c].name, clue: cl, value: cl.value };
+    S.active = { c: c, i: i, cat: b[c].name, clue: cl, value: cl.value, pair: null };
     S.answers = {}; S.buzzOrder = []; S.lockedOut = []; S.current = null; S.reveal = false; S.ddWager = null;
+    S.hostPeek = false;
+
+    /* Hand this clue to the next matchup in the rotation. Rotating per clue
+       rather than pre-assigning tiles keeps the duels even however the host
+       picks around the board. */
+    if (duelsActive()) {
+      S.active.pair = nextPair();
+      S.tour.pairCursor = (S.tour.pairCursor || 0) + 1;
+    }
+
     if (cl.dd) {
+      /* In duel mode the Daily Double belongs to the matchup, so control is
+         settled here instead of blocking on the host picking a team. */
+      if (duelsActive()) {
+        var d = duelTeams() || [];
+        if (S.control && d.indexOf(S.control) >= 0) { /* keep it */ }
+        else S.control = d.slice().sort(function (x, y) { return bestFirst(team(x), team(y)); })[0] || null;
+      }
       if (!S.control) { flash('Pick which team has control first (click a team card)', 'bad'); S.active = null; return; }
       S.phase = 'ddwager'; Snd.dd();
     } else {
@@ -771,11 +877,16 @@ function Host(forcedCode) {
         delete S.answers[who];
         S.current = null;
         S.buzzOrder = S.buzzOrder.filter(function (x) { return x !== who; });
-        var remaining = aliveTeams().filter(function (x) { return S.lockedOut.indexOf(x.id) < 0; });
+        /* A steal only ever opens to teams eligible for this clue — in duel
+           mode that is the other half of the matchup, not the whole room. */
+        var eligible = duelTeams() ? duelTeams().map(team).filter(Boolean) : aliveTeams();
+        var remaining = eligible.filter(function (x) { return S.lockedOut.indexOf(x.id) < 0; });
         if (remaining.length) {
           S.phase = 'clue'; stopTimer();
           if (S.lightning) startTimer(S.settings.lightningSecs);
-          flash(S.lightning ? 'Open to the other finalist' : 'STEAL — open to all other teams', 'bad');
+          flash(S.lightning ? 'Open to the other finalist'
+                : duelTeams() ? 'STEAL — open to ' + esc(remaining[0].name)
+                : 'STEAL — open to all other teams', 'bad');
         }
         else {
           if (!S.lightning) S.active.clue.done = true;
@@ -789,14 +900,53 @@ function Host(forcedCode) {
     if (!S.lightning) S.active.clue.done = true;
     S.reveal = true; S.phase = 'reveal'; stopTimer(); sync();
   }
+  /* Uncover the answer key on the host screen only — the clue stays live and
+     the players' devices learn nothing. Toggles, so the host can check the
+     key and immediately put it away again. */
+  function peekAnswer() {
+    if (!S.active) return;
+    S.hostPeek = !S.hostPeek; render();
+  }
   function backToBoard() {
-    S.active = null; S.reveal = false; S.answers = {};
+    S.active = null; S.reveal = false; S.answers = {}; S.hostPeek = false;
     S.buzzOrder = []; S.lockedOut = []; S.current = null; stopTimer();
     if (S.lightning) { nextLightning(); return; }
     S.phase = 'board';
     sync();
     if (roundCleared()) endRound();
   }
+  /* Redeal every student who has joined across the teams at random. Deals
+     round-robin out of a shuffled pool so team sizes stay within one of each
+     other, and starts dealing at a random team so Team 1 isn't always the one
+     that gets the extra student. Captains go to whoever lands first on each
+     team. Students' phones follow their member id, so they just see their new
+     team appear — nobody has to rejoin. */
+  function shuffleMembers() {
+    if (S.phase !== 'lobby') return;
+    var pool = [];
+    S.teams.forEach(function (t) { pool = pool.concat(t.members); });
+    if (pool.length < 2) { flash('Need at least two students to shuffle', 'bad'); return; }
+    pool = shuffled(pool);
+    S.teams.forEach(function (t) { t.members = []; t.captain = null; });
+
+    /* never leave a student without a seat: if the room is over capacity the
+       cap stretches rather than dropping somebody off the roster */
+    var cap = Math.max(S.settings.teamSize, Math.ceil(pool.length / S.teams.length));
+    var order = shuffled(S.teams.slice());
+    var i = 0;
+    pool.forEach(function (m) {
+      var tries = 0;
+      while (order[i % order.length].members.length >= cap && tries <= order.length) { i++; tries++; }
+      var t = order[i % order.length];
+      t.members.push(m);
+      if (!t.captain) t.captain = m.id;
+      i++;
+    });
+    Snd.tick();
+    flash('Teams reshuffled', 'good');
+    sync();
+  }
+
   /* ---------- tournament ---------- */
   function aliveIds() { return S.tour ? S.tour.alive : S.teams.map(function (t) { return t.id; }); }
   function isAlive(id) { return aliveIds().indexOf(id) >= 0; }
@@ -813,15 +963,77 @@ function Host(forcedCode) {
     return aliveTeams().filter(function (t) { return classOf(t) === c; });
   }
 
+  /* ---------- class vs class: head-to-head duels ---------- */
+  /* Class mode is a cross-class knockout. Every team left in one class is
+     matched against a team in the other, each clue belongs to one of those
+     matchups, and only the two teams in it may buzz. The loser of each
+     matchup goes out at the end of the round, so both classes halve together
+     down to one champion each — who then meet in the Lightning Final.
+     The Lightning Final is already two teams, so duels stop there. */
+  function duelMode() { return S.settings.classMode && !S.lightning; }
+  /* Duels need a live team on both sides. If one class sweeps a round the
+     other is wiped out entirely — there is nobody left to match against, so
+     the survivors play it out among themselves down to the last two. */
+  function duelsActive() { return duelMode() && fullPairs().length > 0; }
+
+  /* Re-paired at the start of every round: best left in A against best left
+     in B, second against second, and so on, so the matchups stay level as
+     the field shrinks. An odd team out draws a BYE — it sits the round out
+     and cannot be eliminated, the usual bracket convention. */
+  function bestFirst(a, b) { return -worstFirst(a, b); }
+  function makePairs() {
+    if (!duelMode()) { S.tour.pairs = []; S.tour.pairCursor = 0; return; }
+    var A = aliveInClass('A').slice().sort(bestFirst);
+    var B = aliveInClass('B').slice().sort(bestFirst);
+    var pairs = [], n = Math.max(A.length, B.length);
+    for (var i = 0; i < n; i++) {
+      pairs.push({ a: A[i] ? A[i].id : null, b: B[i] ? B[i].id : null });
+    }
+    S.tour.pairs = pairs;
+    S.tour.pairCursor = 0;
+  }
+  function pairList() { return (S.tour && S.tour.pairs) || []; }
+  function fullPairs() {
+    return pairList().filter(function (p) { return p.a && p.b; });
+  }
+  function pairOf(teamId) {
+    return pairList().filter(function (p) { return p.a === teamId || p.b === teamId; })[0] || null;
+  }
+  /* teams allowed to buzz on the clue that is open */
+  function duelTeams() {
+    if (!duelMode() || !S.active || !S.active.pair) return null;
+    var p = S.active.pair;
+    return [p.a, p.b].filter(function (id) { return id && isAlive(id); });
+  }
+  function inDuel(teamId) {
+    var d = duelTeams();
+    return !d || d.indexOf(teamId) >= 0;
+  }
+  /* the matchup the next clue will belong to */
+  function nextPair() {
+    var f = fullPairs();
+    if (!f.length) return null;
+    return f[(S.tour.pairCursor || 0) % f.length];
+  }
+  function pairLabel(p) {
+    if (!p) return '';
+    var a = p.a && team(p.a), b = p.b && team(p.b);
+    if (!a || !b) return esc((a || b) ? (a || b).name : '') + ' — BYE';
+    return esc(a.name) + ' vs ' + esc(b.name);
+  }
+
   function startTournament() {
     var plan = lengthPlan(S.settings.lengthMinutes);
-    S.deck = newDeck();
+    /* Keep the used-clue memory — only the category order is redealt. This
+       is what stops a second tournament replaying the first one. */
+    reshuffleCategories(S.deck);
     S.teams.forEach(function (t) { t.score = 0; t.right = 0; t.wrong = 0; });
     autoSplitClasses();
     S.tour = {
       stage: 0,
       totalBoards: boardsNeeded(S.teams.length, S.settings.classMode,
-                                teamsInClass('A').length, teamsInClass('B').length),
+                                teamsInClass('A').length, teamsInClass('B').length,
+                                S.settings.rounds),
       plan: plan,
       board: [],
       alive: S.teams.map(function (t) { return t.id; }),
@@ -837,6 +1049,8 @@ function Host(forcedCode) {
   function dealBoard() {
     var plan = S.tour.plan;
     S.tour.board = drawBoard(S.deck, plan.cats, plan.rows, S.tour.stage + 1);
+    persist();                    /* remember what this board just used up */
+    makePairs();                  /* re-seed the A-vs-B matchups for this round */
     S.phase = 'board';
     S.active = null; S.reveal = false;
     S.buzzOrder = []; S.lockedOut = []; S.current = null; S.answers = {};
@@ -845,18 +1059,52 @@ function Host(forcedCode) {
 
   /* how many go out of each class (or overall, in solo mode) this round */
   function neededCuts() {
+    /* Duels: exactly one team out of every full matchup. A bye survives. */
+    if (duelsActive()) {
+      var n = { A: 0, B: 0 };
+      fullPairs().forEach(function (p) {
+        var loser = duelLoser(p);
+        if (loser) n[classOf(team(loser))]++;
+      });
+      return n;
+    }
     if (!S.settings.classMode) return { A: cutSize(aliveTeams().length) };
-    return { A: classCutSize(aliveInClass('A').length),
-             B: classCutSize(aliveInClass('B').length) };
+    var na = aliveInClass('A').length, nb = aliveInClass('B').length;
+    /* One class has been swept, so there is no second champion to crown.
+       The survivors are just a field now — trim to the last two and let
+       those two contest the final. classCutSize aims at one champion per
+       class and would overshoot here, leaving a final with a single team. */
+    if (!na || !nb) {
+      var trim = cutSize(aliveTeams().length);
+      return { A: na ? trim : 0, B: nb ? trim : 0 };
+    }
+    return { A: classCutSize(na), B: classCutSize(nb) };
+  }
+  /* Who loses a matchup: fewer points, then the record tiebreakers the
+     bracket already used. Returns null once a class is down to a champion. */
+  function duelLoser(p) {
+    var a = p.a && team(p.a), b = p.b && team(p.b);
+    if (!a || !b || !isAlive(a.id) || !isAlive(b.id)) return null;
+    return worstFirst(a, b) <= 0 ? a.id : b.id;
+  }
+  function duelDefaultCuts() {
+    return fullPairs().map(duelLoser).filter(Boolean);
   }
   function totalNeededCuts() {
     var n = neededCuts();
     return (n.A || 0) + (n.B || 0);
   }
 
+  function headToHead() { return isHeadToHead(S.teams.length, S.settings.classMode); }
   function bracketDone() {
+    /* Two teams: nothing to eliminate, so the bracket ends on rounds played. */
+    if (headToHead()) return !S.tour || (S.tour.stage + 1) >= S.tour.totalBoards;
     if (S.settings.classMode) {
-      return aliveInClass('A').length <= 1 && aliveInClass('B').length <= 1;
+      var na = aliveInClass('A').length, nb = aliveInClass('B').length;
+      /* one class swept clean — no champion to crown on that side, so run
+         the survivors down to two and let those two have the final */
+      if (!na || !nb) return aliveTeams().length <= 2;
+      return na <= 1 && nb <= 1;
     }
     return aliveTeams().length <= 2;
   }
@@ -866,11 +1114,18 @@ function Host(forcedCode) {
     if (S.lightning) return;
     if (bracketDone()) { startLightning(); return; }
     var need = neededCuts(), cut = [];
-    Object.keys(need).forEach(function (c) {
-      var pool = (S.settings.classMode ? aliveInClass(c) : aliveTeams()).slice().sort(worstFirst);
-      cut = cut.concat(pool.slice(0, need[c]).map(function (t) { return t.id; }));
-    });
-    if (!cut.length) { startLightning(); return; }
+    if (duelsActive()) {
+      cut = duelDefaultCuts();                 /* the loser of each matchup */
+    } else {
+      Object.keys(need).forEach(function (c) {
+        var pool = (S.settings.classMode ? aliveInClass(c) : aliveTeams()).slice().sort(worstFirst);
+        cut = cut.concat(pool.slice(0, need[c]).map(function (t) { return t.id; }));
+      });
+    }
+    /* Nobody to eliminate but the bracket isn't finished — that's the
+       head-to-head game partway through its rounds. Straight to the next
+       board, no elimination screen. */
+    if (!cut.length) { S.tour.stage++; dealBoard(); return; }
     S.tour.cut = cut;
     S.phase = 'cut';
     stopTimer(); sync();
@@ -878,6 +1133,16 @@ function Host(forcedCode) {
 
   function toggleCut(id) {
     if (S.phase !== 'cut' || !isAlive(id)) return;
+    /* In a duel the two outcomes are linked: marking one team out puts its
+       opponent through. Toggling them independently could only ever produce
+       an invalid cut. */
+    if (duelsActive()) {
+      var p = pairOf(id);
+      if (!p || !p.a || !p.b) return;                 /* a bye can't be cut */
+      S.tour.cut = S.tour.cut.filter(function (x) { return x !== p.a && x !== p.b; });
+      S.tour.cut.push(id);
+      sync(); return;
+    }
     var i = S.tour.cut.indexOf(id);
     if (i >= 0) S.tour.cut.splice(i, 1);
     else S.tour.cut.push(id);
@@ -886,7 +1151,18 @@ function Host(forcedCode) {
 
   function applyCut() {
     var need = neededCuts();
-    if (S.settings.classMode) {
+    /* Duels: exactly one team out of each matchup, no more, no fewer. The
+       host can flip which one, but can't take both or neither. */
+    if (duelsActive()) {
+      var bad = fullPairs().filter(function (p) {
+        var n = (S.tour.cut.indexOf(p.a) >= 0 ? 1 : 0) + (S.tour.cut.indexOf(p.b) >= 0 ? 1 : 0);
+        return n !== 1;
+      });
+      if (bad.length) {
+        flash('Each matchup sends exactly one team out — check ' + pairLabel(bad[0]), 'bad');
+        return;
+      }
+    } else if (S.settings.classMode) {
       var byClass = { A: 0, B: 0 };
       S.tour.cut.forEach(function (id) { var t = team(id); if (t) byClass[classOf(t)]++; });
       if (byClass.A !== need.A || byClass.B !== need.B) {
@@ -939,6 +1215,7 @@ function Host(forcedCode) {
       value: 500
     };
     S.answers = {}; S.buzzOrder = []; S.lockedOut = []; S.current = null; S.reveal = false;
+    S.hostPeek = false;
     S.phase = 'clue';
     startTimer(S.settings.lightningSecs);        /* buzz window */
     sync();
@@ -1040,7 +1317,9 @@ function Host(forcedCode) {
   function stageLabel() {
     if (!S.tour) return 'Setup';
     if (S.lightning) return 'Lightning Final';
-    return 'Round ' + (S.tour.stage + 1) + ' of ' + S.tour.totalBoards;
+    /* A knockout can run long if one class sweeps a round, so the estimate
+       stretches rather than showing "Round 4 of 2". */
+    return 'Round ' + (S.tour.stage + 1) + ' of ' + Math.max(S.tour.totalBoards, S.tour.stage + 1);
   }
 
   function topbar() {
@@ -1080,6 +1359,9 @@ function Host(forcedCode) {
           '<h2 style="margin:0;font-size:22px">Teams <span style="opacity:.6;font-weight:600;font-size:15px">' + total +
             ' / ' + (S.settings.teamCount * S.settings.teamSize) + ' seats filled</span></h2>' +
           '<div class="spacer"></div>' +
+          '<button class="btn' + (total < 2 ? ' ghost' : '') + '" data-act="shuffle"' +
+            (total < 2 ? ' disabled' : '') + ' title="Randomly redeal every student across the teams">' +
+            '🔀 Shuffle members</button>' +
           '<button class="btn primary" data-act="start">Start Game →</button>' +
         '</div>' +
         '<div class="tgrid">' + S.teams.map(function (t) {
@@ -1125,6 +1407,33 @@ function Host(forcedCode) {
     '</div>';
   }
 
+  /* The matchup card rail: every A-vs-B duel this round, with the one the
+     next clue belongs to lit up. Without this the host has no way to know
+     whose clue is coming, and the room can't see the bracket. */
+  function duelStrip() {
+    if (!duelsActive()) return '';
+    var up = nextPair(), f = fullPairs();
+    return '<div class="duelstrip">' +
+      '<div class="dshead">Matchups <span>' + f.length + ' duel' + (f.length === 1 ? '' : 's') +
+        ' · clues rotate in order</span></div>' +
+      '<div class="dsrow">' + pairList().map(function (p) {
+        var a = p.a && team(p.a), b = p.b && team(p.b);
+        var live = up && p === up;
+        if (!a || !b) {
+          var solo = a || b;
+          return '<div class="dscard bye"><span class="dsn">' + esc(solo ? solo.name : '') + '</span>' +
+            '<span class="dsvs">BYE</span></div>';
+        }
+        return '<div class="dscard' + (live ? ' live' : '') + '">' +
+          '<span class="dsn" style="border-color:' + a.color + '">' + esc(a.name) + '</span>' +
+          '<span class="dsvs">vs</span>' +
+          '<span class="dsn" style="border-color:' + b.color + '">' + esc(b.name) + '</span>' +
+          (live ? '<span class="dsup">UP NEXT</span>' : '') +
+        '</div>';
+      }).join('') + '</div>' +
+    '</div>';
+  }
+
   function boardView() {
     if (S.lightning) return lightningView();
     var b = currentBoard();
@@ -1143,12 +1452,13 @@ function Host(forcedCode) {
               (cl.done ? '' : fmt(cl.value)) + '</div>';
           }).join('') + '</div>';
       }).join('') + '</div>' +
+      duelStrip() +
       scoreStrip() +
       '<div class="row" style="justify-content:center">' +
         '<button class="btn' + (roundCleared() ? ' primary' : ' ghost sm') + '" data-act="endround">' +
           (roundCleared() ? 'Board cleared — go to eliminations →' : 'End this round early') + '</button>' +
         '<button class="btn ghost sm" data-act="new">New tournament</button>' +
-        '<span class="hint">Keys: <b>' + buzzKeyHint() + '</b> buzz · <b>Y</b>/<b>N</b> judge · <b>Space</b> continue</span>' +
+        '<span class="hint">Keys: <b>' + buzzKeyHint() + '</b> buzz · <b>Y</b>/<b>N</b> judge · <b>A</b> reveal answer · <b>Space</b> continue</span>' +
       '</div>' +
     '</div>';
   }
@@ -1162,7 +1472,12 @@ function Host(forcedCode) {
   }
 
   function queueHTML() {
-    if (!S.buzzOrder.length && !S.lockedOut.length) return '<div class="queue"><span class="hint">Waiting for a buzz…</span></div>';
+    if (!S.buzzOrder.length && !S.lockedOut.length) {
+      var d = duelTeams();
+      return '<div class="queue"><span class="hint">' +
+        (d && d.length ? 'Waiting on ' + d.map(function (id) { return esc(team(id).name); }).join(' or ')
+                       : 'Waiting for a buzz…') + '</span></div>';
+    }
     return '<div class="queue">' +
       S.buzzOrder.map(function (id, n) {
         var t = team(id);
@@ -1188,15 +1503,25 @@ function Host(forcedCode) {
         '<div class="objtag">Obj ' + esc(cl.obj) + '</div>' +
         '<button class="btn sm ghost" data-act="close">Esc ✕</button>' +
       '</div>' +
+      /* whose clue this is — nobody else can buzz on it */
+      (A.pair ? '<div class="duelnow">' + pairLabel(A.pair) +
+        '<span> · only these two can buzz</span></div>' : '') +
       '<div class="qbox"><div class="qtext">' + esc(cl.q) + '</div></div>' +
+      /* While a team is still working the clue the host sees the question and
+         the clock, nothing else. Keystrokes were never sent anyway — the old
+         "typing…" placeholder just implied they were. The panel appears the
+         moment an answer is actually submitted. */
       (isLive || isJudge ?
         '<div class="row" style="align-items:stretch">' +
           (isLive ? '<div class="timer">' + ringHTML() + '</div>' : '') +
           '<div style="flex:1;min-width:260px">' +
-            '<div class="subans' + (ans ? '' : ' empty') + '" style="height:100%">' +
-              '<div class="who">' + (who ? esc(who.name) : '') + (ans && ans.by ? ' — typed by ' + esc(ans.by) : '') + '</div>' +
-              '<div class="txt">' + (ans ? esc(ans.text) : (isJudge ? 'No answer submitted — time expired' : 'typing…')) + '</div>' +
-            '</div>' +
+            (ans || isJudge ?
+              '<div class="subans' + (ans ? '' : ' empty') + '" style="height:100%">' +
+                '<div class="who">' + (who ? esc(who.name) : '') + (ans && ans.by ? ' — typed by ' + esc(ans.by) : '') + '</div>' +
+                '<div class="txt">' + (ans ? esc(ans.text) : 'No answer submitted — time expired') + '</div>' +
+              '</div>'
+            : '<div class="awaiting">' + (who ? esc(who.name) : 'The team') +
+              ' is on the clock — their answer appears here once they submit it.</div>') +
           '</div>' +
         '</div>' : '') +
       (isDD ? '' : queueHTML()) +
@@ -1205,11 +1530,19 @@ function Host(forcedCode) {
           '<button class="btn good lg" data-act="ok">✓ Correct <span style="opacity:.7;font-size:13px">(Y)</span></button>' +
           '<button class="btn bad lg" data-act="no">✕ Incorrect <span style="opacity:.7;font-size:13px">(N)</span></button>' : '') +
         '<div class="spacer"></div>' +
-        '<button class="btn" data-act="show">Reveal answer &amp; move on</button>' +
+        '<button class="btn" data-act="show">Show answer &amp; move on</button>' +
       '</div>' +
       scoreStrip() +
-      '<div class="hostans"><span style="opacity:.6">Host only —</span> <b>' + esc(cl.a) + '</b>' +
-        (cl.alt && cl.alt.length ? '<span style="opacity:.7"> &nbsp;·&nbsp; also accept: ' + esc(cl.alt.join(' / ')) + '</span>' : '') + '</div>' +
+      /* Answer key stays covered until the host clicks Reveal. */
+      '<div class="hostans' + (S.hostPeek ? '' : ' hidden') + '">' +
+        '<span class="lbl">Host only —</span> ' +
+        (S.hostPeek
+          ? '<b>' + esc(cl.a) + '</b>' +
+            (cl.alt && cl.alt.length ? '<span style="opacity:.7"> &nbsp;·&nbsp; also accept: ' + esc(cl.alt.join(' / ')) + '</span>' : '') +
+            '<button class="btn sm" data-act="peek">🙈 Hide answer</button>'
+          : '<span class="masked">answer hidden</span>' +
+            '<button class="btn sm" data-act="peek">👁 Reveal answer</button>') +
+      '</div>' +
     '</div>';
   }
 
@@ -1240,6 +1573,19 @@ function Host(forcedCode) {
       '</div>' +
       '<div class="hint" style="margin-top:16px;opacity:.85">' + esc(t.name) + ' can also enter this on their own device. No buzzing, no steal — this one is theirs alone.</div>' +
     '</div></div>';
+  }
+
+  /* one half of a matchup row — clicking it sends that team out and puts
+     its opponent through */
+  function cutSide(t) {
+    var doomed = S.tour.cut.indexOf(t.id) >= 0;
+    return '<div class="rankrow' + (doomed ? ' doomed' : ' safe') + '" data-cut="' + t.id + '">' +
+      '<span class="dot" style="background:' + t.color + '"></span>' +
+      '<b class="nm">' + esc(t.name) + '</b>' +
+      '<span class="rec">' + (t.right || 0) + '<i>✓</i> ' + (t.wrong || 0) + '<i>✗</i></span>' +
+      '<span class="sc">' + fmt(t.score) + '</span>' +
+      '<span class="tag">' + (doomed ? 'OUT' : 'ADVANCES') + '</span>' +
+    '</div>';
   }
 
   function cutRow(t, i) {
@@ -1275,7 +1621,25 @@ function Host(forcedCode) {
   function cutView() {
     var need = neededCuts();
     var anyTie, columns;
-    if (S.settings.classMode) {
+    /* Duels: one row per matchup, so the room reads it as "this team beat
+       that team" instead of two separate league tables. */
+    if (duelsActive()) {
+      anyTie = fullPairs().some(function (p) { return trulyLevel(team(p.a), team(p.b)); });
+      columns = '<div class="cutcol duels">' + pairList().map(function (p) {
+        var a = p.a && team(p.a), b = p.b && team(p.b);
+        if (!a || !b) {
+          var solo = a || b;
+          if (!solo) return '';
+          return '<div class="duelrow bye"><div class="dside">' + cutSide(solo) +
+            '</div><div class="dmid">BYE</div><div class="dside"><span class="byetxt">no opponent — advances</span></div></div>';
+        }
+        return '<div class="duelrow">' +
+          '<div class="dside">' + cutSide(a) + '</div>' +
+          '<div class="dmid">' + (a.score === b.score ? 'LEVEL' : 'vs') + '</div>' +
+          '<div class="dside right">' + cutSide(b) + '</div>' +
+        '</div>';
+      }).join('') + '</div>';
+    } else if (S.settings.classMode) {
       anyTie = tieAtLine(aliveInClass('A')) || tieAtLine(aliveInClass('B'));
       columns = ['A', 'B'].map(function (c) {
         var pool = sortForCut(aliveInClass(c));
@@ -1302,7 +1666,11 @@ function Host(forcedCode) {
       '<div class="qbox" style="align-items:flex-start"><div style="width:min(1080px,100%)">' +
         '<h1 style="font-size:clamp(24px,3.4vw,40px);margin:0 0 4px;text-align:center">STANDINGS</h1>' +
         '<div class="hint" style="text-align:center;margin-bottom:14px">' +
-          (anyTie
+          (duelsActive()
+            ? (anyTie
+                ? '<b style="color:var(--royal-yellow)">DEAD HEAT</b> — a matchup is level on points AND record. Click the team you want out.'
+                : 'Every matchup sends exactly one team out — the lower score. Click a team to flip its matchup.')
+            : anyTie
             ? '<b style="color:var(--royal-yellow)">DEAD HEAT</b> — same points AND same record across the cut line. Click any team to choose who goes out.'
             : 'Ties break on record: fewer ✓ goes out first; still level, the team that buzzed less goes out. Click any team to override.') + '</div>' +
         '<div class="cutgrid' + (S.settings.classMode ? ' two' : '') + '">' + columns + '</div>' +
@@ -1353,7 +1721,8 @@ function Host(forcedCode) {
     var plan = lengthPlan(S.settings.lengthMinutes);
     var half = Math.ceil(S.settings.teamCount / 2);
     var boards = boardsNeeded(S.settings.teamCount, S.settings.classMode,
-                              half, S.settings.teamCount - half);
+                              half, S.settings.teamCount - half, S.settings.rounds);
+    var h2h = isHeadToHead(S.settings.teamCount, S.settings.classMode);
     return '<div class="modal"><div class="card">' +
       '<div class="row"><h2 style="margin:0;flex:1">Game settings</h2><button class="btn sm ghost" data-act="closeset">✕</button></div>' +
       '<div class="grid2" style="margin-top:14px">' +
@@ -1366,6 +1735,14 @@ function Host(forcedCode) {
         '<div><label class="fld">Seconds to answer</label><input id="setSecs" type="number" min="5" max="120" value="' + S.settings.answerSecs + '"></div>' +
         '<div><label class="fld">Lightning Final seconds</label><input id="setLight" type="number" min="5" max="60" value="' + S.settings.lightningSecs + '"></div>' +
         '<div><label class="fld">Minimum Daily Double wager</label><input id="setMin" type="number" min="0" step="100" value="' + S.settings.minWager + '"></div>' +
+        /* Only two teams means no eliminations, so the bracket can't work out
+           the length on its own — the host says how many boards to play. It
+           stays visible (greyed) at other team counts so it's findable, rather
+           than a field that appears out of nowhere when you drop to 2. */
+        '<div><label class="fld">Rounds before the final' +
+          (h2h ? '' : ' <span style="opacity:.6;text-transform:none;letter-spacing:0">— 2 teams only</span>') +
+          '</label><input id="setRounds" type="number" min="1" max="' + MAX_ROUNDS + '" value="' +
+          (h2h ? S.settings.rounds : boards) + '"' + (h2h ? '' : ' disabled') + '></div>' +
       '</div>' +
       '<div class="row" style="margin-top:13px">' +
         '<label><input type="checkbox" id="setClass"' + (S.settings.classMode ? ' checked' : '') + '> <b>Class vs Class</b> — split the teams into two classes</label>' +
@@ -1382,9 +1759,14 @@ function Host(forcedCode) {
         '<b>Room:</b> ' + (S.settings.teamCount * S.settings.teamSize) + ' students (' +
           S.settings.teamCount + ' teams × ' + S.settings.teamSize + ')' +
           (S.settings.classMode ? ' — <b>' + half + ' teams vs ' + (S.settings.teamCount - half) + ' teams</b>' : '') + '.<br>' +
-        '<b>Bracket:</b> ' + boards + ' board' + (boards === 1 ? '' : 's') + ' of ' + plan.cats + ' × ' + plan.rows +
-          (S.settings.classMode
-            ? ', dropping the bottom 2 of EACH class each round, until one champion per class. Then a ' +
+        '<b>Bracket:</b> <span id="brBoards">' + boards + ' board' + (boards === 1 ? '' : 's') + '</span> of ' + plan.cats + ' × ' + plan.rows +
+          (h2h
+            ? ' head-to-head — no eliminations with only two teams — then a ' + plan.lightning +
+              '-question Lightning Final. Change <b>Rounds before the final</b> to play more or fewer boards.'
+            : S.settings.classMode
+            ? ' — every team is matched <b>one against one</b> across the classes, best vs best, ' +
+              'and only the two teams in a matchup may buzz on its clue. The loser of each matchup ' +
+              'goes out, so both classes halve each round down to one champion apiece. Then a ' +
               plan.lightning + '-question Lightning Final: ' + esc(S.settings.classA) + ' vs ' + esc(S.settings.classB) + '.'
             : ', dropping the bottom 2 each round, then a ' + plan.lightning +
               '-question Lightning Final between the last two.') +
@@ -1399,6 +1781,22 @@ function Host(forcedCode) {
           ? '<br><br><b>Heads up:</b> Firebase\'s free plan allows 100 devices at once.'
           : '') +
       '</div>' +
+      /* Used clues carry over between tournaments, so the host needs to see
+         how much of the pool is left and be able to put it all back. */
+      (function () {
+        var used = Math.min(S.deck.drawn || 0, deckTotal()), all = deckTotal();
+        var pct = all ? Math.round(used / all * 100) : 0;
+        return '<div class="notice" style="margin-top:10px">' +
+          '<div class="row" style="gap:10px">' +
+            '<div style="flex:1;min-width:200px"><b>Question pool:</b> ' + fmt(all - used) +
+              ' of ' + fmt(all) + ' clues still unused (' + (100 - pct) + '%).<br>' +
+              '<span style="opacity:.75">Used clues carry over between tournaments, so back-to-back ' +
+              'games don\'t repeat. Reset when you want to start the whole pool over.</span></div>' +
+            '<button class="btn sm ghost" data-act="resetpool">Reset pool</button>' +
+          '</div>' +
+          '<div class="poolbar"><i style="width:' + pct + '%"></i></div>' +
+        '</div>';
+      })() +
       '<div class="row" style="margin-top:16px"><button class="btn primary" data-act="saveset">Save</button>' +
         '<button class="btn ghost" data-act="closeset">Cancel</button></div>' +
     '</div></div>';
@@ -1499,6 +1897,10 @@ function Host(forcedCode) {
         S.settings.lightningSecs = Math.max(5, parseInt($('#setLight').value, 10) || 10);
         S.settings.lengthMinutes = parseInt($('#setLen').value, 10) || 60;
         S.settings.minWager = Math.max(0, parseInt($('#setMin').value, 10) || 0);
+        /* greyed out at 3+ teams — leave the stored value alone there */
+        if ($('#setRounds') && !$('#setRounds').disabled) {
+          S.settings.rounds = Math.max(1, Math.min(MAX_ROUNDS, parseInt($('#setRounds').value, 10) || 1));
+        }
         S.settings.deduct = $('#setDeduct').checked;
         S.settings.sound = $('#setSound').checked; Snd.on = S.settings.sound;
         S.settings.classMode = $('#setClass').checked;
@@ -1518,6 +1920,14 @@ function Host(forcedCode) {
       case 'ok':      judge(true); break;
       case 'no':      judge(false); break;
       case 'show':    revealNow(); break;
+      case 'peek':    peekAnswer(); break;
+      case 'shuffle': shuffleMembers(); break;
+      case 'resetpool':
+        if (!confirm('Put all ' + fmt(deckTotal()) + ' questions back in the pool?\n\n' +
+                     'Games will start drawing questions your classes have already had.')) break;
+        S.deck = newDeck(); persist(); render();
+        flash('Question pool reset — all ' + fmt(deckTotal()) + ' clues available', 'good');
+        break;
       case 'back':    backToBoard(); break;
       case 'close':   backToBoard(); break;
       case 'ddgo':    doWager(S.control, $('#ddw').value); break;
@@ -1532,6 +1942,7 @@ function Host(forcedCode) {
     var n = parseInt(e.key, 10);
     var slot = BUZZ_KEYS.indexOf(e.key);
     if (slot >= 0 && slot < S.teams.length && S.phase === 'clue') { doBuzz(S.teams[slot].id); e.preventDefault(); return; }
+    if ((e.key === 'a' || e.key === 'A') && S.active) { peekAnswer(); e.preventDefault(); return; }
     if (['answering', 'judge', 'ddclue', 'ddjudge'].indexOf(S.phase) >= 0) {
       if (e.key === 'y' || e.key === 'Y') { judge(true); e.preventDefault(); return; }
       if (e.key === 'n' || e.key === 'N') { judge(false); e.preventDefault(); return; }
@@ -1545,6 +1956,15 @@ function Host(forcedCode) {
     if (e.key === 'Escape' && S.active) backToBoard();
   }
   app.addEventListener('click', onClick);
+  /* The rest of the settings modal only catches up on Save, but the round
+     count exists purely to change the sentence underneath it — a summary
+     still reading "1 board" while the box says 3 looks broken. */
+  app.addEventListener('input', function (e) {
+    if (e.target.id !== 'setRounds' || e.target.disabled) return;
+    var n = Math.max(1, Math.min(MAX_ROUNDS, parseInt(e.target.value, 10) || 1));
+    var el = $('#brBoards');
+    if (el) el.textContent = n + ' board' + (n === 1 ? '' : 's');
+  });
   document.addEventListener('keydown', onKey);
   window.addEventListener('resize', fitClue);
 
@@ -1574,7 +1994,7 @@ function Player(code, seat) {
 
   /* seat lets ONE machine drive more than one player (testing, shared laptop):
      #/play/ABCD/2 is a separate identity from #/play/ABCD/1 */
-  var KEY = 'fo:me:' + code + (seat ? ':' + seat : '');
+  var KEY = 'fo:me:' + GAME_ID + ':' + code + (seat ? ':' + seat : '');
   var me = ssGet(KEY, null) || { memberId: uid(), teamId: null, name: '' };
   ssSet(KEY, me);
 
@@ -1614,7 +2034,20 @@ function Player(code, seat) {
     if (!p.lockedOut) p.lockedOut = [];
     return p;
   }
-  function onPub(p) { P = normalizePub(p); render(); }
+  /* Whatever is half-typed in the answer box belongs to the clue that was on
+     screen when it was typed. When the host moves on, drop it — otherwise a
+     team that ran out of time on one question opens the next one with the old
+     answer sitting in the box, and submits it by reflex. */
+  var lastClueSig = '';
+  function clueSig(p) {
+    return p && p.q ? [p.q.cat, p.q.value, p.q.text].join('') : '';
+  }
+  function onPub(p) {
+    P = normalizePub(p);
+    var sig = clueSig(P);
+    if (sig !== lastClueSig) { lastClueSig = sig; draft.answer = ''; }
+    render();
+  }
   function onTimer(t) {
     timer.running = t.running;
     timer.endsAt = t.endsAt;
@@ -1850,12 +2283,21 @@ function Player(code, seat) {
     }
 
     /* clue / answering / judge */
-    var canBuzz = ph === 'clue' && !iAmLocked && !iBuzzed;
+    /* Class vs class runs as duels: a clue belongs to one A-vs-B matchup and
+       the rest of the room sits it out. Say so on the button rather than
+       leaving students mashing a buzzer the host is ignoring. */
+    var duel = (P.q && P.q.duel) || null;
+    var myDuel = !duel || duel.indexOf(t.id) >= 0;
+    var rival = duel && duel.length === 2
+      ? P.teams.filter(function (x) { return duel.indexOf(x.id) >= 0 && x.id !== t.id; })[0] : null;
+
+    var canBuzz = ph === 'clue' && !iAmLocked && !iBuzzed && myDuel;
     var label, cls = 'buzz';
     if (iAmCurrent && (ph === 'answering' || ph === 'judge')) { label = 'YOU\'RE UP'; cls += ' mine'; }
+    else if (!myDuel) label = 'NOT YOUR MATCHUP — SIT THIS ONE OUT';
     else if (iAmLocked) label = 'LOCKED OUT — this one\'s gone';
     else if (iBuzzed && ph === 'clue') label = 'BUZZED IN · #' + (pos + 1) + ' in line';
-    else if (ph === 'clue') label = 'BUZZ';
+    else if (ph === 'clue') label = rival ? 'BUZZ · vs ' + rival.name.toUpperCase() : 'BUZZ';
     else label = 'ANOTHER TEAM HAS IT';
 
     body = questionCard() +
@@ -1871,8 +2313,12 @@ function Player(code, seat) {
     } else if (ph === 'clue' && (P.buzzOrder || []).length) {
       var f = P.teams.filter(function (x) { return x.id === P.buzzOrder[0]; })[0];
       status = (f ? f.name : 'Another team') + ' buzzed first.';
+    } else if (ph === 'clue' && !myDuel) {
+      status = 'This clue belongs to another matchup. Yours comes back around next rotation.';
     } else if (ph === 'clue') {
-      status = iAmLocked ? 'You already had your shot on this one.' : 'Buzz when your team knows it.';
+      status = iAmLocked ? 'You already had your shot on this one.'
+             : rival ? 'Head-to-head with ' + rival.name + ' — buzz when you know it.'
+             : 'Buzz when your team knows it.';
     }
     return header() + body + '<div class="statusline">' + status + '</div>';
   }
@@ -1951,6 +2397,20 @@ function Player(code, seat) {
     if (e.target.id === 'myname') draft.myname = e.target.value;
     if (e.target.id === 'tname') draft.tname = e.target.value;
     if (e.target.id === 'wager') draft.wager = e.target.value;
+  });
+  /* Enter submits; Shift+Enter still makes a new line. On a phone keyboard the
+     Submit button is often under the keyboard, and students were losing seconds
+     dismissing it to find the button. Also covers the name and wager boxes. */
+  app.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    var id = e.target.id, btn = null;
+    if (id === 'ans')         btn = $('[data-act="answer"]') || $('[data-act="finalanswer"]');
+    else if (id === 'myname') btn = $('[data-act="join"]');
+    else if (id === 'tname')  btn = $('[data-act="setname"]');
+    else if (id === 'wager')  btn = $('[data-act="wager"]') || $('[data-act="finalwager"]');
+    if (!btn || btn.disabled || e.target.disabled) return;
+    e.preventDefault();
+    btn.click();
   });
 
   render();
