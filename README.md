@@ -216,12 +216,112 @@ students reliably lose points on.
 That's enough for a **4-board tournament with zero repeats**. If a game ever
 runs the pool dry, it recycles rather than breaking.
 
+## Three kinds of game
+
+Open **⚙ Game settings** and pick under **What are we playing?**
+
+| Style | The board | The Lightning Final |
+|---|---|---|
+| **Normal** | The CompTIA Security+ SY0-701 question bank, as always | Question bank |
+| **Acronyms** | Every column is acronyms | Acronyms |
+| **Mixed** | Whole acronym columns sitting among normal ones | Question bank |
+
+All three work exactly the same in **Class vs Class** — the style and the
+class split are independent settings.
+
+### There is no difficulty ramp in an acronym
+
+The question bank is authored easiest-first, and that ordering *is* the
+100 → 500 climb down a column. Nothing equivalent exists for acronyms. So on
+an acronym column the ramp is the **task**, not the item:
+
+| Row | What the team is asked |
+|---|---|
+| Cheap | Expand the letters — "Expand this acronym: *X*" |
+| Middle | Name it from a description |
+| Dear | Say what it actually does |
+
+Same acronym, three difficulties. An acronym is only ever served **once** per
+pool cycle; which of the three forms it arrives as depends on where it lands.
+
+The Lightning Final uses the hardest form throughout — by the final,
+expanding letters is not a championship question.
+
+### Mixed boards
+
+Roughly a third of the columns are acronyms, never fewer than one and never
+the whole board. They are **shuffled in among the question columns**, not
+bolted onto the end, so a team cannot quietly steer around them.
+
+### The Lightning Final remembers too
+
+It did not used to. The board deck has carried its used clues across
+tournaments from the start, but the Lightning Final reshuffled the whole
+pool every game — so a class playing two or three games in an afternoon met
+the same championship questions each time, while the board in front of them
+never repeated.
+
+It now works the same way as everything else: used final questions are
+remembered, carried between tournaments, and recycled only once the pool is
+genuinely spent. **Reset pool** clears them along with the board clues,
+because it is the same bank. Game settings shows how many are left.
+
+### The acronym pool remembers, same as the question pool
+
+Used acronyms carry over between tournaments and survive a page reload.
+**Acronyms and Mixed games share one memory** — an acronym seen on a mixed
+board won't come back in an acronym game either.
+
+Game settings shows how much is left and gives you a **Reset acronyms**
+button beside the existing **Reset pool**. The two are separate: resetting
+acronyms does not put already-seen questions back, and vice versa.
+
+The pool empties to within one board of exhaustion before it recycles. (A
+board needs 16 clues, so a remainder smaller than that can never be
+dealt.)
+
+### Acronyms that mean two things
+
+Some acronyms in this bank legitimately mean more than one thing. Both
+belong in the game, but "expand it" would then have two right answers, so
+the clue names the field it wants and the host screen carries a note that
+the other reading exists. This is automatic: the builder finds any acronym
+with more than one expansion and marks it.
+
+## Editing the acronyms
+
+**Don't edit `acronyms-security.js` by hand.** It's generated from the Security-Acronyms repo,
+which is the source of truth:
+
+```
+python3 tools/build-acronyms.py \
+  ../security-acronyms/data/acronyms.json \
+  acronyms-security.js FACEOFF_ACRONYMS "SECURITY+" "CompTIA Security+ SY0-701" security
+```
+
+The last argument names a taxonomy in **`tools/acronym-topics.py`**. This
+bank ships no categories of its own — only `{id, acronym, expansion,
+definition}` — so that file supplies the column headings, and **the build
+fails and names any acronym that isn't in it**. An acronym that quietly fell
+through would never be dealt and nobody would notice.
+
+The builder reports how many acronyms and categories it wrote, which have
+more than one meaning, and which categories are too small to fill a five-row
+column. Categories with fewer than 5 entries sit out the tallest boards —
+they still play on shorter boards and in the Lightning Final. Currently: INDUSTRIAL & EMBEDDED.
+
+Editing the generated file by hand works until somebody regenerates it, at
+which point the edit is gone. Change the acronym repo instead and rebuild.
+
 ## Files
 
 | File | What it is |
 |---|---|
 | `index.html` | The game — all markup and styling |
 | `app.js` | Game engine: host console, student device, networking |
+| `acronyms-security.js` | The acronym bank — **generated**, see above |
+| `tools/build-acronyms.py` | Rebuilds it from the Security-Acronyms repo |
+| `tools/acronym-topics.py` | Column headings for a bank that carries none |
 | `questions-security.js` | **The question bank — this is the file you'll edit** |
 | `firebase-config.js` | Paste your Firebase keys here to go live |
 | `qr.js` | Self-contained QR generator (no CDN, works offline) |
