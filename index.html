@@ -416,6 +416,25 @@ label.fld{display:block;font-size:12px;letter-spacing:.09em;text-transform:upper
 .modal .card input{padding:9px 12px}
 .modal .card label.fld{margin-bottom:4px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+/* A qualifier beside a field label. Was inline opacity:.6, which put it at
+   3.69:1 — under AAA on a build whose students include people with
+   service-related eye damage. Same visual role, readable. */
+.fldnote{text-transform:none;letter-spacing:0;color:#f2f6ff}
+/* WHAT KIND OF GAME. Three cards rather than a dropdown: the host is
+   often setting this up on a projector in front of a room, and a choice
+   the class can read from the back is worth the extra width. */
+.stylerow{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+.stylepick{display:flex;flex-direction:column;gap:3px;cursor:pointer;
+  padding:11px 12px;border-radius:11px;border:1px solid var(--line);
+  background:rgba(255,255,255,0.05);transition:border-color .12s,background .12s}
+.stylepick__t{display:flex;align-items:center;gap:8px}
+.stylepick b{font-size:15px;letter-spacing:.2px}
+.stylepick__n{font-size:12.5px;color:#e9eefb;line-height:1.35}
+.stylepick input{margin:0;flex:none}
+.stylepick:hover:not(.off){border-color:var(--royal-yellow)}
+.stylepick.on{border-color:var(--royal-yellow);background:rgba(234,179,8,.16)}
+.stylepick.off{opacity:.45;cursor:not-allowed}
+@media (max-width:700px){.stylerow{grid-template-columns:1fr}}
 .notice{border-left:3px solid var(--royal-yellow);padding:9px 13px;background:rgba(234,179,8,.1);border-radius:0 10px 10px 0;font-size:13.5px;line-height:1.5}
 .flash{position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:90;padding:12px 22px;border-radius:12px;
   font-weight:800;font-size:16px;box-shadow:0 10px 40px rgba(0,0,0,.4);animation:fade .2s}
@@ -434,6 +453,7 @@ label.fld{display:block;font-size:12px;letter-spacing:.09em;text-transform:upper
 <div id="flash-host"></div>
 
 <script src="questions-security.js?v=6"></script>
+<script src="acronyms-security.js?v=6"></script>
 <script src="firebase-config.js?v=6"></script>
 <script src="qr.js?v=6"></script>
 <script src="app.js?v=6"></script>
