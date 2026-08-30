@@ -428,13 +428,17 @@ function poolFingerprint() {
   return POOL.length + ':' + POOL.reduce(function (n, c) { return n + c.clues.length; }, 0);
 }
 function newDeck() {
-  var d = { used: {}, cursor: 0, drawn: 0, fp: poolFingerprint() };
+  var d = { used: {}, cursor: 0, drawn: 0, lused: {}, fp: poolFingerprint() };
   reshuffleCategories(d);
   return d;
 }
 function loadDeck(saved) {
   if (!saved || saved.fp !== poolFingerprint() || !saved.used) return newDeck();
   saved.drawn = saved.drawn || Object.keys(saved.used).length;
+  /* Decks saved before the Lightning Final had a memory get one now, rather
+     than being thrown away — a host mid-way through a pool should not lose
+     it to an update. */
+  saved.lused = saved.lused || {};
   if (!saved.order || saved.order.length !== POOL.length) reshuffleCategories(saved);
   return saved;
 }
@@ -506,6 +510,252 @@ function drawBoard(deck, nCats, nRows, mult, recycled) {
   }
   placeDailyDoubles(board, (board.length * nRows) >= 20 ? 2 : 1);
   return board;
+}
+
+/* =====================================================================
+   THE ACRONYM POOL
+
+   A second deck, run on exactly the contract the question deck runs on:
+   used clues remembered in localStorage, pinned to a fingerprint of the
+   file they came from, carried across tournaments, and cleared only when
+   the host asks. An acronym is not served twice until the pool is spent.
+
+   The one thing acronyms do NOT have is a difficulty ramp. The question
+   bank is authored easiest-first and that ordering IS the 100-to-500 climb
+   down a column; nothing equivalent exists for MAC against SD-WAN. So the
+   ramp here is the TASK rather than the item:
+
+     cheap rows   EXPAND    — "TCP" -> "Transmission Control Protocol"
+     middle rows  IDENTIFY  — a description -> which acronym is it
+     dear rows    EXPLAIN   — "TCP" -> what it actually does
+
+   That gives a column that genuinely gets harder, and it means one acronym
+   can carry three different clues without ever being repeated inside a
+   pool cycle: the deck marks the ACRONYM used, not the form, because "do
+   not repeat the acronyms" is the rule that was asked for.
+   ===================================================================== */
+var AB = window.FACEOFF_ACRONYMS || null;
+var ACRO_POOL = (AB && AB.categories) || [];
+
+/* Which of the three forms a row gets. Boards run 3 to 5 rows, so this
+   spreads the three bands across whatever height the board is rather than
+   assuming five. */
+function acroBand(row, nRows) {
+  if (nRows <= 1) return 0;
+  return Math.min(2, Math.floor(row * 3 / nRows));
+}
+
+/* The clue itself, built from the acronym rather than stored beside it.
+   `alt` is what the host may also accept — on the cheap rows the acronym
+   alone is not enough, on the dear rows an expansion alone is not either,
+   and the host screen shows both so the call is consistent between rooms. */
+function acroClue(it, band) {
+  /* Some acronyms mean two things. Network+ has STP for both Spanning Tree
+     Protocol and Shielded Twisted Pair, and both belong in the game — but
+     "expand STP" then has two right answers, and a team giving the other
+     one would be marked wrong for knowing more. Where the bank flags an
+     acronym as ambiguous the clue names the field it wants, and the host
+     line says the other reading exists so the call is the same in every
+     room. */
+  var where = it.amb ? ' (as used in ' + it.amb + ')' : '';
+  var note = it.amb ? ['NOTE: "' + it.ac + '" also means something else on this exam — ' +
+                       'this clue wants the ' + it.amb + ' one'] : [];
+  if (band === 0) {
+    return { q: 'Expand this acronym' + where + ': “' + it.ac + '”',
+             a: it.ex,
+             alt: [it.ex + ' — ' + it.df].concat(note) };
+  }
+  if (band === 1) {
+    return { q: it.df + '  — which acronym is being described?',
+             a: it.ac + ' (' + it.ex + ')',
+             alt: [it.ac, it.ex] };
+  }
+  return { q: '“' + it.ac + '”' + where + ' — what does it actually do?',
+           a: it.df,
+           alt: [it.ex + ' — ' + it.df].concat(note) };
+}
+
+function acroFingerprint() {
+  return ACRO_POOL.length + ':' + ACRO_POOL.reduce(function (n, c) { return n + c.items.length; }, 0);
+}
+function acroTotal() {
+  return ACRO_POOL.reduce(function (n, c) { return n + c.items.length; }, 0);
+}
+function newAcroDeck() {
+  var d = { used: {}, cursor: 0, drawn: 0, lused: {}, fp: acroFingerprint() };
+  reshuffleAcroCategories(d);
+  return d;
+}
+function loadAcroDeck(saved) {
+  if (!saved || saved.fp !== acroFingerprint() || !saved.used) return newAcroDeck();
+  saved.drawn = saved.drawn || Object.keys(saved.used).length;
+  saved.lused = saved.lused || {};
+  if (!saved.order || saved.order.length !== ACRO_POOL.length) reshuffleAcroCategories(saved);
+  return saved;
+}
+function reshuffleAcroCategories(deck) {
+  deck.order = shuffled(ACRO_POOL.map(function (_, i) { return i; }));
+  deck.cursor = 0;
+}
+
+/* Unlike the question bank there is no difficulty ordering to respect
+   inside a category, so a column is just nRows unused acronyms picked at
+   random. Returns null when this category cannot fill a column — the
+   caller skips it, which is how a four-entry category quietly sits out a
+   five-row board instead of producing a short column. */
+function pickAcroRows(deck, ci, total, nRows) {
+  var free = [];
+  for (var k = 0; k < total; k++) if (!deck.used[ci + ':' + k]) free.push(k);
+  if (free.length < nRows) return null;
+  var pick = shuffled(free).slice(0, nRows);
+  return pick;
+}
+
+function drawAcroBoard(deck, nCats, nRows, mult, recycled) {
+  if (!ACRO_POOL.length) return [];
+  if (!deck.order || deck.order.length !== ACRO_POOL.length) reshuffleAcroCategories(deck);
+  nCats = Math.min(nCats, ACRO_POOL.length);
+  var board = [], seen = 0;
+  while (board.length < nCats && seen < ACRO_POOL.length) {
+    var ci = deck.order[deck.cursor % deck.order.length];
+    deck.cursor++; seen++;
+    var cat = ACRO_POOL[ci];
+    var picks = pickAcroRows(deck, ci, cat.items.length, nRows);
+    if (!picks) continue;
+    picks.forEach(function (k) { deck.used[ci + ':' + k] = true; });
+    deck.drawn = (deck.drawn || 0) + picks.length;
+    board.push({
+      name: cat.name,
+      acro: true,
+      clues: picks.map(function (k, row) {
+        var c = acroClue(cat.items[k], acroBand(row, nRows));
+        return { q: c.q, a: c.a, alt: c.alt, obj: '',
+                 value: (row + 1) * 100 * mult, done: false, dd: false };
+      })
+    });
+  }
+  /* DRAIN THE POOL BEFORE RECYCLING IT.
+
+     Dealing only whole categories meant the board gave up as soon as fewer
+     than nCats categories still held a full column, and recycled the entire
+     deck — measured, that happened at 96 of 135 acronyms, so more than a
+     quarter of the bank was never served before it started repeating. On a
+     build whose whole point is "do not repeat until I say so", quietly
+     skipping 29% of the content is the bug.
+
+     So the leftovers get pooled: whatever is still unused anywhere fills the
+     remaining columns, and only a genuinely empty pool recycles. */
+  if (board.length < nCats) {
+    var left = [];
+    ACRO_POOL.forEach(function (cat, ci) {
+      cat.items.forEach(function (it, k) {
+        if (!deck.used[ci + ':' + k]) left.push({ ci: ci, k: k, it: it });
+      });
+    });
+    left = shuffled(left);
+    while (board.length < nCats && left.length >= nRows) {
+      var take = left.splice(0, nRows);
+      take.forEach(function (x) { deck.used[x.ci + ':' + x.k] = true; });
+      deck.drawn = (deck.drawn || 0) + take.length;
+      board.push({
+        name: 'ACRONYMS · MIXED BAG',
+        acro: true,
+        clues: take.map(function (x, row) {
+          var c = acroClue(x.it, acroBand(row, nRows));
+          return { q: c.q, a: c.a, alt: c.alt, obj: '',
+                   value: (row + 1) * 100 * mult, done: false, dd: false };
+        })
+      });
+    }
+  }
+  if (board.length < nCats && !recycled) {
+    deck.used = {}; deck.drawn = 0;
+    reshuffleAcroCategories(deck);
+    return drawAcroBoard(deck, nCats, nRows, mult, true);
+  }
+  return board;
+}
+
+/* MIXED. Whole acronym categories sitting beside whole question
+   categories, roughly a third of the board, never fewer than one and
+   never the whole board. Whole columns rather than acronyms scattered
+   through the question categories, so a heading still describes what is
+   underneath it and the room can see what it is picking. */
+function acroShare(nCats) {
+  return Math.max(1, Math.min(nCats - 1, Math.round(nCats / 3)));
+}
+
+function drawMixedBoard(deck, adeck, nCats, nRows, mult) {
+  var nAcro = ACRO_POOL.length ? acroShare(nCats) : 0;
+  var acro = nAcro ? drawAcroBoard(adeck, nAcro, nRows, mult) : [];
+  var qs = drawBoard(deck, nCats - acro.length, nRows, mult);
+  /* Interleave rather than concatenate: two acronym columns bolted onto
+     the right-hand end read as an optional annexe, and a team that wants
+     to avoid them can. Shuffled together they cannot. */
+  var board = shuffled(qs.concat(acro));
+  placeDailyDoubles(board, (board.length * nRows) >= 20 ? 2 : 1);
+  return board;
+}
+
+/* One entry point, so nothing downstream has to know which style is on. */
+function drawStyledBoard(style, deck, adeck, nCats, nRows, mult) {
+  if (style === 'acronyms') {
+    var b = drawAcroBoard(adeck, nCats, nRows, mult);
+    placeDailyDoubles(b, (b.length * nRows) >= 20 ? 2 : 1);
+    return b;
+  }
+  if (style === 'mixed') return drawMixedBoard(deck, adeck, nCats, nRows, mult);
+  return drawBoard(deck, nCats, nRows, mult);
+}
+
+/* The acronym Lightning Final, with the memory the board deck has. The
+   question bank's own Lightning has none — it reshuffles every tournament
+   and does repeat between games — but "do not repeat the acronyms" was
+   asked for plainly, so this one remembers. Dear-row form throughout: by
+   the final, expanding letters is not a championship question. */
+function drawAcroLightning(deck, n) {
+  var all = [];
+  ACRO_POOL.forEach(function (cat, ci) {
+    cat.items.forEach(function (it, k) { all.push({ ci: ci, k: k, it: it }); });
+  });
+  if (!all.length) return [];
+  var free = all.filter(function (x) { return !deck.lused[x.ci + ':' + x.k]; });
+  if (free.length < n) { deck.lused = {}; free = all; }
+  var take = shuffled(free).slice(0, n);
+  take.forEach(function (x) { deck.lused[x.ci + ':' + x.k] = true; });
+  return take.map(function (x) {
+    var c = acroClue(x.it, 2);
+    return { q: c.q, a: c.a, alt: c.alt, obj: '' };
+  });
+}
+
+/* THE LIGHTNING FINAL, WITH A MEMORY.
+
+   The board deck has remembered its used clues across tournaments from the
+   start; the Lightning Final did not. It reshuffled the whole pool every
+   game, so a class playing back to back met the same championship questions
+   two and three times while the board in front of them never repeated.
+
+   Same rule as everywhere else: take what has not been used, mark it, and
+   only start again once the pool is genuinely spent. Reset pool clears this
+   along with the board clues, because it is the same pool. */
+function drawLightning(deck, n) {
+  if (!LIGHTNING.length) return [];
+  deck.lused = deck.lused || {};
+  var free = [];
+  for (var i = 0; i < LIGHTNING.length; i++) if (!deck.lused[i]) free.push(i);
+  if (free.length < n) {
+    deck.lused = {};
+    free = LIGHTNING.map(function (_, i) { return i; });
+  }
+  var take = shuffled(free).slice(0, n);
+  take.forEach(function (i) { deck.lused[i] = true; });
+  return take.map(function (i) { return LIGHTNING[i]; });
+}
+
+function lightningLeft(deck) {
+  if (!LIGHTNING.length) return 0;
+  return LIGHTNING.length - Object.keys((deck && deck.lused) || {}).length;
 }
 
 function placeDailyDoubles(board, count) {
@@ -590,11 +840,17 @@ function Host(forcedCode) {
       teamCount: 8, teamSize: 5, answerSecs: 15, lightningSecs: 10,
       lengthMinutes: 60, minWager: 100, deduct: false, sound: true,
       rounds: 1,          /* boards before the final — head-to-head games only */
+      /* Which pool the board is dealt from. 'normal' is the question bank
+         this game shipped with; 'acronyms' is the acronym bank; 'mixed'
+         puts whole acronym categories on a question board. Orthogonal to
+         classMode on purpose — every style plays solo or class vs class. */
+      gameStyle: 'normal',
       classMode: false, classA: 'CLASS A', classB: 'CLASS B'
     }, (saved && saved.settings) || {}),
     phase: 'lobby',
     teams: [],
     deck: loadDeck(saved && saved.deck),
+    adeck: loadAcroDeck(saved && saved.adeck),
     tour: null,           /* set when the tournament starts */
     lightning: false,     /* true once the last two teams are heads-up */
     active: null, control: null,
@@ -651,7 +907,9 @@ function Host(forcedCode) {
   /* the deck rides along so used clues survive a reload, not just a new
      tournament — a projector that gets refreshed mid-class shouldn't reset
      the class back to question one */
-  function persist() { lsSet(HOST_KEY, { room: S.room, settings: S.settings, deck: S.deck }); }
+  function persist() {
+    lsSet(HOST_KEY, { room: S.room, settings: S.settings, deck: S.deck, adeck: S.adeck });
+  }
 
   /* ---------- publish ---------- */
   function pubState() {
@@ -1027,6 +1285,7 @@ function Host(forcedCode) {
     /* Keep the used-clue memory — only the category order is redealt. This
        is what stops a second tournament replaying the first one. */
     reshuffleCategories(S.deck);
+    reshuffleAcroCategories(S.adeck);
     S.teams.forEach(function (t) { t.score = 0; t.right = 0; t.wrong = 0; });
     autoSplitClasses();
     S.tour = {
@@ -1048,7 +1307,8 @@ function Host(forcedCode) {
 
   function dealBoard() {
     var plan = S.tour.plan;
-    S.tour.board = drawBoard(S.deck, plan.cats, plan.rows, S.tour.stage + 1);
+    S.tour.board = drawStyledBoard(S.settings.gameStyle, S.deck, S.adeck,
+                                   plan.cats, plan.rows, S.tour.stage + 1);
     persist();                    /* remember what this board just used up */
     makePairs();                  /* re-seed the A-vs-B matchups for this round */
     S.phase = 'board';
@@ -1189,7 +1449,12 @@ function Host(forcedCode) {
   /* ---------- lightning final ---------- */
   function startLightning() {
     S.lightning = true;
-    S.tour.lq = shuffled(LIGHTNING);
+    /* Acronym games finish on acronyms. Mixed games finish on the question
+       bank, because the mixed board has already had its acronym columns. */
+    S.tour.lq = (S.settings.gameStyle === 'acronyms' && ACRO_POOL.length)
+      ? drawAcroLightning(S.adeck, Math.max(S.tour.lqTotal, 1))
+      : drawLightning(S.deck, Math.max(S.tour.lqTotal, 1));
+    persist();                    /* the acronym final spends pool too */
     S.tour.lqAsked = 0;
     S.tour.board = [];
     S.control = null;
@@ -1740,10 +2005,34 @@ function Host(forcedCode) {
            stays visible (greyed) at other team counts so it's findable, rather
            than a field that appears out of nowhere when you drop to 2. */
         '<div><label class="fld">Rounds before the final' +
-          (h2h ? '' : ' <span style="opacity:.6;text-transform:none;letter-spacing:0">— 2 teams only</span>') +
+          (h2h ? '' : ' <span class="fldnote">— 2 teams only</span>') +
           '</label><input id="setRounds" type="number" min="1" max="' + MAX_ROUNDS + '" value="' +
           (h2h ? S.settings.rounds : boards) + '"' + (h2h ? '' : ' disabled') + '></div>' +
       '</div>' +
+      /* WHAT KIND OF GAME. Sits above Class vs Class because it is the
+         bigger choice and because the two are independent — every style
+         plays either way round. */
+      (function () {
+        var st = S.settings.gameStyle || 'normal';
+        var have = ACRO_POOL.length > 0;
+        function opt(v, label, note, on) {
+          return '<label class="stylepick' + (st === v ? ' on' : '') + (on ? '' : ' off') + '">' +
+            '<span class="stylepick__t">' +
+              '<input type="radio" name="gstyle" value="' + v + '"' +
+                (st === v ? ' checked' : '') + (on ? '' : ' disabled') + '>' +
+              '<b>' + label + '</b></span>' +
+            '<span class="stylepick__n">' + note + '</span></label>';
+        }
+        return '<div style="margin-top:16px"><label class="fld">What are we playing?</label>' +
+          '<div class="stylerow">' +
+            opt('normal', 'Normal', fmt(deckTotal()) + ' exam clues', true) +
+            opt('acronyms', 'Acronyms', have ? fmt(acroTotal()) + ' acronyms' : 'no acronym file loaded', have) +
+            opt('mixed', 'Mixed', have ? 'acronym columns on a normal board' : 'needs the acronym file', have) +
+          '</div>' +
+          (have ? '' : '<div class="hint" style="margin-top:6px">' +
+            'Add <span class="mono">acronyms-security.js</span> to enable the other two styles.</div>') +
+        '</div>';
+      })() +
       '<div class="row" style="margin-top:13px">' +
         '<label><input type="checkbox" id="setClass"' + (S.settings.classMode ? ' checked' : '') + '> <b>Class vs Class</b> — split the teams into two classes</label>' +
       '</div>' +
@@ -1789,10 +2078,35 @@ function Host(forcedCode) {
         return '<div class="notice" style="margin-top:10px">' +
           '<div class="row" style="gap:10px">' +
             '<div style="flex:1;min-width:200px"><b>Question pool:</b> ' + fmt(all - used) +
-              ' of ' + fmt(all) + ' clues still unused (' + (100 - pct) + '%).<br>' +
+              ' of ' + fmt(all) + ' clues still unused (' + (100 - pct) + '%)' +
+              (LIGHTNING.length
+                ? ', and ' + fmt(lightningLeft(S.deck)) + ' of ' + fmt(LIGHTNING.length) +
+                  ' Lightning Final questions'
+                : '') + '.<br>' +
               '<span style="opacity:.75">Used clues carry over between tournaments, so back-to-back ' +
-              'games don\'t repeat. Reset when you want to start the whole pool over.</span></div>' +
+              'games don\'t repeat \u2014 the Lightning Final included. Reset when you want to start ' +
+              'the whole pool over.</span></div>' +
             '<button class="btn sm ghost" data-act="resetpool">Reset pool</button>' +
+          '</div>' +
+          '<div class="poolbar"><i style="width:' + pct + '%"></i></div>' +
+        '</div>';
+      })() +
+      /* The acronym pool gets the same meter and the same button. Separate
+         memory and separate reset: a host who has worn out the acronyms
+         should be able to put those back without also handing the class a
+         question bank it has already seen. */
+      (function () {
+        if (!ACRO_POOL.length) return '';
+        var used = Math.min(S.adeck.drawn || 0, acroTotal()), all = acroTotal();
+        var pct = all ? Math.round(used / all * 100) : 0;
+        return '<div class="notice" style="margin-top:10px">' +
+          '<div class="row" style="gap:10px">' +
+            '<div style="flex:1;min-width:200px"><b>Acronym pool:</b> ' + fmt(all - used) +
+              ' of ' + fmt(all) + ' acronyms still unused (' + (100 - pct) + '%).<br>' +
+              '<span style="opacity:.75">Used in Acronyms and Mixed games alike, so an acronym ' +
+              'seen on a mixed board will not come back in an acronym game either. Reset when ' +
+              'you want the whole set back.</span></div>' +
+            '<button class="btn sm ghost" data-act="resetacro">Reset acronyms</button>' +
           '</div>' +
           '<div class="poolbar"><i style="width:' + pct + '%"></i></div>' +
         '</div>';
@@ -1904,6 +2218,13 @@ function Host(forcedCode) {
         S.settings.deduct = $('#setDeduct').checked;
         S.settings.sound = $('#setSound').checked; Snd.on = S.settings.sound;
         S.settings.classMode = $('#setClass').checked;
+        /* Which pool we are dealing from. Falls back to the question bank
+           rather than to whatever was checked, so a build shipped without an
+           acronym file cannot be left pointing at an empty pool. */
+        var gs = document.querySelector('input[name="gstyle"]:checked');
+        var want = gs ? gs.value : 'normal';
+        if ((want === 'acronyms' || want === 'mixed') && !ACRO_POOL.length) want = 'normal';
+        S.settings.gameStyle = want;
         if ($('#setClsA')) S.settings.classA = ($('#setClsA').value || 'CLASS A').slice(0, 18);
         if ($('#setClsB')) S.settings.classB = ($('#setClsB').value || 'CLASS B').slice(0, 18);
         makeTeams(S.settings.teamCount); persist(); S.settingsOpen = false; sync(); break;
@@ -1922,6 +2243,15 @@ function Host(forcedCode) {
       case 'show':    revealNow(); break;
       case 'peek':    peekAnswer(); break;
       case 'shuffle': shuffleMembers(); break;
+      case 'resetacro':
+        if (!confirm('Put all ' + fmt(acroTotal()) + ' acronyms back in the pool?\n\n' +
+                     'Games will start drawing acronyms your classes have already had.')) break;
+        S.adeck = newAcroDeck();
+        persist();
+        flash('Acronym pool reset — all ' + fmt(acroTotal()) + ' back in play');
+        render();
+        break;
+
       case 'resetpool':
         if (!confirm('Put all ' + fmt(deckTotal()) + ' questions back in the pool?\n\n' +
                      'Games will start drawing questions your classes have already had.')) break;
@@ -1959,6 +2289,18 @@ function Host(forcedCode) {
   /* The rest of the settings modal only catches up on Save, but the round
      count exists purely to change the sentence underneath it — a summary
      still reading "1 board" while the box says 3 looks broken. */
+  /* The chosen card has to light up the moment it is clicked. The class is
+     rendered from the SAVED setting, so until Save was pressed the old
+     choice and the new one both looked selected — on a projector, in front
+     of a class, with no way to tell which one the game would actually use. */
+  app.addEventListener('change', function (e) {
+    if (e.target.name !== 'gstyle') return;
+    var picks = document.querySelectorAll('.stylepick');
+    for (var i = 0; i < picks.length; i++) {
+      var input = picks[i].querySelector('input[name="gstyle"]');
+      picks[i].classList.toggle('on', !!(input && input.checked));
+    }
+  });
   app.addEventListener('input', function (e) {
     if (e.target.id !== 'setRounds' || e.target.disabled) return;
     var n = Math.max(1, Math.min(MAX_ROUNDS, parseInt(e.target.value, 10) || 1));
