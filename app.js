@@ -55,7 +55,7 @@ var COLORS = [
   { id: 'slate',  name: 'Slate',   hex: '#475569' }
 ];
 var MAX_TEAMS = 16, MAX_TEAM_SIZE = 8;
-var MAX_ROUNDS = 10;              /* ceiling on the head-to-head round picker */
+var MAX_ROUNDS = 20;              /* ceiling on the host's round count */
 
 /* Every Face-Off game deploys to the same github.io origin, and localStorage
    is keyed per ORIGIN, not per folder. Sharing one 'fo:host' key meant these
@@ -407,13 +407,35 @@ function trulyLevel(a, b) {
    can't decide the length for you — the host picks how many boards to play
    before the head-to-head final. Every other team count is unchanged. */
 function isHeadToHead(teams, classMode) { return !classMode && teams === 2; }
-function boardsNeeded(teams, classMode, aCount, bCount, rounds) {
-  if (isHeadToHead(teams, classMode)) return Math.max(1, Math.min(MAX_ROUNDS, rounds || 1));
+
+/* What the bracket WOULD take, if left to decide for itself. */
+function bracketBoards(teams, classMode, aCount, bCount) {
+  if (isHeadToHead(teams, classMode)) return 1;
   /* Duels knock out one team per matchup, so each class halves every round. */
   if (classMode) {
     return Math.max(1, Math.ceil(Math.log(Math.max(2, aCount, bCount)) / Math.log(2)));
   }
   return Math.max(1, Math.ceil((teams - 2) / 2));
+}
+
+/* THE HOST'S NUMBER WINS.
+
+   This used to be the bracket's decision at every team count except two:
+   the tournament ran however many boards it took to knock the room down
+   to a final pair, and the rounds field was greyed out. That made the
+   length of a lesson a consequence of how many teams turned up.
+
+   Now `rounds` is null for "let the bracket decide" and a number for "play
+   exactly this many". When the host's number is shorter than the bracket
+   needs, the boards run out with more than two teams still in — and the
+   top two by score go to the final. See neededCuts(), which trims to the
+   final pair on the last scheduled board. */
+function hostSetRounds(rounds) { return rounds !== null && rounds !== undefined && rounds !== ''; }
+function boardsNeeded(teams, classMode, aCount, bCount, rounds) {
+  if (hostSetRounds(rounds)) {
+    return Math.max(1, Math.min(MAX_ROUNDS, parseInt(rounds, 10) || 1));
+  }
+  return bracketBoards(teams, classMode, aCount, bCount);
 }
 function cutSize(alive) { return Math.max(0, Math.min(2, alive - 2)); }
 function classCutSize(aliveInClass) { return Math.max(0, Math.min(2, aliveInClass - 1)); }
@@ -719,8 +741,42 @@ function drawAcroLightning(deck, n) {
     cat.items.forEach(function (it, k) { all.push({ ci: ci, k: k, it: it }); });
   });
   if (!all.length) return [];
-  var free = all.filter(function (x) { return !deck.lused[x.ci + ':' + x.k]; });
-  if (free.length < n) { deck.lused = {}; free = all; }
+  /* THE FINAL MUST NOT REPEAT THE BOARD.
+
+     This filtered on `lused` alone, which is the acronyms the FINAL has
+     used in previous games. `used` — the acronyms the BOARD has just put
+     in front of the room — was not consulted, so a team could meet the
+     same acronym twice in one sitting: once for points and again for the
+     championship. Both tables are keyed the same way (`ci + ':' + k`), so
+     this was one missing condition rather than a missing feature.
+
+     Falling back has an order to it. Running short relaxes the
+     cross-game memory first, because repeating a final question from
+     LAST week is a small thing; repeating one from the board ten minutes
+     ago is the thing that was actually complained about. Only a pool too
+     small to fill a final any other way gives that up too. */
+  var boardUsed = deck.used || {};
+  var free = all.filter(function (x) {
+    var key = x.ci + ':' + x.k;
+    return !deck.lused[key] && !boardUsed[key];
+  });
+  if (free.length < n) {
+    deck.lused = {};
+    free = all.filter(function (x) { return !boardUsed[x.ci + ':' + x.k]; });
+  }
+  /* STILL short. The final gets SHORTER rather than repeating the board.
+     "No board questions in the final" was the requirement, and a
+     ten-question final is a smaller disappointment than meeting the same
+     acronym twice in one sitting.
+
+     A+ Core 1 and Core 2 share a 202-acronym pool, so a long session can
+     genuinely run it down — eight boards of five-by-five is 200 of them.
+     That is more than a class plays in one sitting, but it is reachable,
+     and reachable is enough to design for.
+
+     The one thing worse than a short final is no final at all, so a pool
+     with nothing left is the single case that gives this up. */
+  if (!free.length) free = all;
   var take = shuffled(free).slice(0, n);
   take.forEach(function (x) { deck.lused[x.ci + ':' + x.k] = true; });
   return take.map(function (x) {
@@ -839,7 +895,9 @@ function Host(forcedCode) {
     settings: Object.assign({
       teamCount: 8, teamSize: 5, answerSecs: 15, lightningSecs: 10,
       lengthMinutes: 60, minWager: 100, deduct: false, sound: true,
-      rounds: 1,          /* boards before the final — head-to-head games only */
+      /* null means "let the bracket decide". A number means the host has
+         said how many boards to play, and that wins over the bracket. */
+      rounds: null,
       /* Which pool the board is dealt from. 'normal' is the question bank
          this game shipped with; 'acronyms' is the acronym bank; 'mixed'
          puts whole acronym categories on a question board. Orthogonal to
@@ -1328,6 +1386,21 @@ function Host(forcedCode) {
       });
       return n;
     }
+    /* LAST SCHEDULED BOARD, and more teams still in than a final can hold.
+       The host said how long this game runs, so the field is trimmed
+       straight to two rather than the game running on to satisfy the
+       bracket. In class vs class that means one finalist per class where
+       both classes still have somebody — the whole point of that mode is
+       a champion from each side, and an early finish should not quietly
+       turn it into two teams from the same class. */
+    if (hostSetRounds(S.settings.rounds) && roundsSpent() && aliveTeams().length > 2) {
+      if (S.settings.classMode) {
+        var ca = aliveInClass('A').length, cb = aliveInClass('B').length;
+        if (ca && cb) return { A: Math.max(0, ca - 1), B: Math.max(0, cb - 1) };
+        return { A: ca ? aliveTeams().length - 2 : 0, B: cb ? aliveTeams().length - 2 : 0 };
+      }
+      return { A: aliveTeams().length - 2 };
+    }
     if (!S.settings.classMode) return { A: cutSize(aliveTeams().length) };
     var na = aliveInClass('A').length, nb = aliveInClass('B').length;
     /* One class has been swept, so there is no second champion to crown.
@@ -1356,9 +1429,17 @@ function Host(forcedCode) {
   }
 
   function headToHead() { return isHeadToHead(S.teams.length, S.settings.classMode); }
+  /* Every scheduled board has been played. */
+  function roundsSpent() {
+    return !S.tour || (S.tour.stage + 1) >= S.tour.totalBoards;
+  }
   function bracketDone() {
     /* Two teams: nothing to eliminate, so the bracket ends on rounds played. */
-    if (headToHead()) return !S.tour || (S.tour.stage + 1) >= S.tour.totalBoards;
+    if (headToHead()) return roundsSpent();
+    /* THE HOST'S ROUND COUNT WINS. When the boards are spent, the
+       tournament is over — neededCuts() has already trimmed the field to
+       the final two on this board, so there is a proper final to play. */
+    if (hostSetRounds(S.settings.rounds) && roundsSpent() && aliveTeams().length <= 2) return true;
     if (S.settings.classMode) {
       var na = aliveInClass('A').length, nb = aliveInClass('B').length;
       /* one class swept clean — no champion to crown on that side, so run
@@ -2004,10 +2085,16 @@ function Host(forcedCode) {
            the length on its own — the host says how many boards to play. It
            stays visible (greyed) at other team counts so it's findable, rather
            than a field that appears out of nowhere when you drop to 2. */
+        /* Always editable now, at every team count and in every style.
+           Empty means "let the bracket decide" and the placeholder shows
+           what that would be, so the host can see the default without it
+           being imposed. Typing a number overrides it. */
         '<div><label class="fld">Rounds before the final' +
-          (h2h ? '' : ' <span class="fldnote">— 2 teams only</span>') +
-          '</label><input id="setRounds" type="number" min="1" max="' + MAX_ROUNDS + '" value="' +
-          (h2h ? S.settings.rounds : boards) + '"' + (h2h ? '' : ' disabled') + '></div>' +
+          ' <span class="fldnote">— blank = auto (' + bracketBoards(S.settings.teamCount,
+              S.settings.classMode, half, S.settings.teamCount - half) + ')</span>' +
+          '</label><input id="setRounds" type="number" min="1" max="' + MAX_ROUNDS +
+          '" placeholder="auto" value="' +
+          (hostSetRounds(S.settings.rounds) ? S.settings.rounds : '') + '"></div>' +
       '</div>' +
       /* WHAT KIND OF GAME. Sits above Class vs Class because it is the
          bigger choice and because the two are independent — every style
@@ -2059,6 +2146,18 @@ function Host(forcedCode) {
               plan.lightning + '-question Lightning Final: ' + esc(S.settings.classA) + ' vs ' + esc(S.settings.classB) + '.'
             : ', dropping the bottom 2 each round, then a ' + plan.lightning +
               '-question Lightning Final between the last two.') +
+        /* A host-set count shorter than the bracket is not a mistake, but
+           it does change what happens at the end, and the host should
+           know before the room finds out. */
+        (function () {
+          if (!hostSetRounds(S.settings.rounds)) return '';
+          var auto = bracketBoards(S.settings.teamCount, S.settings.classMode,
+                                   half, S.settings.teamCount - half);
+          if (boards >= auto || h2h) return '';
+          return '<br><br><b>Short game:</b> the bracket would take ' + auto + ' boards to reach a final. ' +
+            'On board ' + boards + ' the field is cut straight to the top two by score' +
+            (S.settings.classMode ? ' — one from each class — ' : ' ') + 'and they play the final.';
+        })() +
         (function () {
           var per = (plan.cats * plan.rows) / Math.max(1, S.settings.teamCount);
           if (per >= 1.5) return '';
@@ -2213,7 +2312,10 @@ function Host(forcedCode) {
         S.settings.minWager = Math.max(0, parseInt($('#setMin').value, 10) || 0);
         /* greyed out at 3+ teams — leave the stored value alone there */
         if ($('#setRounds') && !$('#setRounds').disabled) {
-          S.settings.rounds = Math.max(1, Math.min(MAX_ROUNDS, parseInt($('#setRounds').value, 10) || 1));
+          /* Blank hands the decision back to the bracket. */
+          var rv = ($('#setRounds').value || '').trim();
+          S.settings.rounds = rv === '' ? null
+            : Math.max(1, Math.min(MAX_ROUNDS, parseInt(rv, 10) || 1));
         }
         S.settings.deduct = $('#setDeduct').checked;
         S.settings.sound = $('#setSound').checked; Snd.on = S.settings.sound;
@@ -2302,10 +2404,18 @@ function Host(forcedCode) {
     }
   });
   app.addEventListener('input', function (e) {
-    if (e.target.id !== 'setRounds' || e.target.disabled) return;
-    var n = Math.max(1, Math.min(MAX_ROUNDS, parseInt(e.target.value, 10) || 1));
+    if (e.target.id !== 'setRounds') return;
+    /* Blank means auto, so the preview has to fall back to what the
+       bracket would take rather than showing 1. The field is never
+       disabled now, so the old disabled guard would never have fired
+       anyway. */
+    var raw = (e.target.value || '').trim();
+    var half2 = Math.ceil(S.settings.teamCount / 2);
+    var n = raw === ''
+      ? bracketBoards(S.settings.teamCount, S.settings.classMode, half2, S.settings.teamCount - half2)
+      : Math.max(1, Math.min(MAX_ROUNDS, parseInt(raw, 10) || 1));
     var el = $('#brBoards');
-    if (el) el.textContent = n + ' board' + (n === 1 ? '' : 's');
+    if (el) el.textContent = n + ' board' + (n === 1 ? '' : 's') + (raw === '' ? ' (auto)' : '');
   });
   document.addEventListener('keydown', onKey);
   window.addEventListener('resize', fitClue);
