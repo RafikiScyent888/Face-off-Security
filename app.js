@@ -86,34 +86,493 @@ function flash(msg, kind) {
   flash._t = setTimeout(function () { host.innerHTML = ''; }, 1800);
 }
 
-/* ------------------------------------------------------------------ */
-/* sound                                                               */
-/* ------------------------------------------------------------------ */
+/* ==================================================================== */
+/* SOUND                                                                */
+/*                                                                      */
+/* EVERYTHING HERE IS GENERATED, NOT RECORDED. There is not one audio    */
+/* file in this repository. Every sound is built live in the browser     */
+/* out of oscillators and filtered noise, which means: nothing to        */
+/* download, nothing to go missing, it works with no internet, and it    */
+/* cannot be anybody else's recording even by accident.                  */
+/*                                                                      */
+/* ON THE GAME SHOW THESE ARE MODELLED AFTER: the think cue, the         */
+/* buzzer, the Daily Double sting and the theme are owned property.      */
+/* What is written below borrows the JOB each sound does and the         */
+/* character it does it with — a harsh low buzzer, a rising harp-like    */
+/* flourish for the big one, a steady ticking bed that runs the whole    */
+/* clock and resolves when it hits zero. The melodies are ours. Close    */
+/* in feel, not a copy, and if a licensed recording is ever bought,      */
+/* each cue is a single function to swap out.                            */
+/*                                                                      */
+/* --------------------------------------------------------------------*/
+/* THE BED IS THE PART THAT NEEDS CARE                                   */
+/*                                                                      */
+/* A one-shot cue cannot outlive itself. A music bed can, and when it    */
+/* does it plays underneath the next clue, or two of them stack up and   */
+/* the room gets a wall of noise. So the bed has exactly ONE owner:      */
+/* the answer clock. bedStart is called from startTimer and bedStop      */
+/* from stopTimer, and nowhere else. Every way a clue can end — judged   */
+/* right, judged wrong, stolen, revealed, timed out, host closes it,     */
+/* round ends, final starts, game over — already funnels through         */
+/* stopTimer, so there is no exit path that can leave it running.        */
+/*                                                                      */
+/* It is scheduled with a LOOK-AHEAD rather than laid out in advance.    */
+/* Booking two minutes of notes up front means two minutes of nodes to   */
+/* hunt down and cancel when the host judges an answer after four        */
+/* seconds. This way only the next fifth of a second exists at any       */
+/* moment, and stopping is a single gain ramp.                           */
+/* ==================================================================== */
 var Snd = {
-  on: true, ctx: null,
+  on: true,          /* master switch — the host's "Sound effects"      */
+  music: true,       /* the countdown bed, switchable on its own        */
+  volume: 0.7,
+  ctx: null, master: null, cueBus: null, musicBus: null,
+  _noiseBuf: null, _bed: null,
+
+  /* The context is built on first use and resumed every time, because a
+     browser will not let a page make noise until somebody has clicked
+     something, and a context created before that gesture starts life
+     suspended. Note this does NOT check `on` — a muted host still needs
+     a live context ready for when they unmute. */
   ac: function () {
-    if (!this.on) return null;
-    if (!this.ctx) { var C = window.AudioContext || window.webkitAudioContext; if (!C) return null; this.ctx = new C(); }
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (!this.ctx) {
+      var C = window.AudioContext || window.webkitAudioContext; if (!C) return null;
+      try { this.ctx = new C(); } catch (e) { return null; }
+      this.master = this.ctx.createGain();
+      this.master.gain.value = this.volume;
+      this.master.connect(this.ctx.destination);
+      this.cueBus = this.ctx.createGain();
+      this.cueBus.gain.value = 1;
+      this.cueBus.connect(this.master);
+      /* The bed sits under the cues on purpose. It plays for fifteen
+         seconds straight; a buzzer plays for a quarter of one. Level
+         them the same and the room stops hearing the buzzer. */
+      this.musicBus = this.ctx.createGain();
+      this.musicBus.gain.value = 0.5;
+      this.musicBus.connect(this.master);
+    }
+    if (this.ctx.state === 'suspended') { try { this.ctx.resume(); } catch (e) {} }
     return this.ctx;
   },
-  tone: function (freq, dur, type, vol, delay) {
-    var c = this.ac(); if (!c) return;
+
+  setVolume: function (v) {
+    this.volume = Math.max(0, Math.min(1, Number(v) || 0));
+    if (this.master) this.master.gain.value = this.volume;
+  },
+
+  /* ---- raw material ------------------------------------------------ */
+
+  /* One two-second buffer of white noise, reused for every crash,
+     handclap and woodblock in here. Generating a fresh one per hit is
+     the sort of thing that makes a classroom laptop stutter. */
+  noiseBuffer: function (c) {
+    if (!this._noiseBuf) {
+      var n = Math.floor(c.sampleRate * 2);
+      var b = c.createBuffer(1, n, c.sampleRate), d = b.getChannelData(0);
+      for (var i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+      this._noiseBuf = b;
+    }
+    return this._noiseBuf;
+  },
+
+  /* A pitched note. `glide` bends to a second frequency across the note,
+     which is what turns a beep into a siren, a swoop or a fall. */
+  tone: function (freq, dur, type, vol, delay, glide, bus) {
+    if (!this.on) return null;
+    var c = this.ac(); if (!c) return null;
     var t0 = c.currentTime + (delay || 0);
     var o = c.createOscillator(), g = c.createGain();
-    o.type = type || 'sine'; o.frequency.setValueAtTime(freq, t0);
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(freq, t0);
+    if (glide) o.frequency.exponentialRampToValueAtTime(Math.max(1, glide), t0 + dur);
     g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(vol || 0.18, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol || 0.18), t0 + 0.008);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    o.connect(g); g.connect(c.destination); o.start(t0); o.stop(t0 + dur + 0.03);
+    o.connect(g); g.connect(bus || this.cueBus);
+    o.start(t0); o.stop(t0 + dur + 0.03);
+    return o;
   },
-  buzz:    function () { this.tone(200, .28, 'square', .16); this.tone(150, .3, 'square', .12, .02); },
-  correct: function () { this.tone(660, .13, 'sine', .18); this.tone(880, .22, 'sine', .18, .12); },
-  wrong:   function () { this.tone(200, .3, 'sawtooth', .13); this.tone(140, .35, 'sawtooth', .12, .1); },
-  dd:      function () { [523, 659, 784, 1047].forEach(function (f, i) { Snd.tone(f, .3, 'triangle', .16, i * .1); }); },
-  tick:    function () { this.tone(1100, .04, 'square', .05); },
-  timeup:  function () { this.tone(120, .6, 'sawtooth', .16); }
+
+  /* A band of noise. Sweeping the filter is how you get a whoosh; a
+     short high band is a stick hit; a long wide band is a crowd. */
+  noise: function (dur, vol, delay, f0, f1, q, bus) {
+    if (!this.on) return null;
+    var c = this.ac(); if (!c) return null;
+    var t0 = c.currentTime + (delay || 0);
+    var s = c.createBufferSource(); s.buffer = this.noiseBuffer(c);
+    s.loop = true;
+    var bp = c.createBiquadFilter();
+    bp.type = 'bandpass'; bp.Q.value = q || 1;
+    bp.frequency.setValueAtTime(f0, t0);
+    if (f1 && f1 !== f0) bp.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t0 + dur);
+    var g = c.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), t0 + Math.min(0.02, dur / 3));
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    s.connect(bp); bp.connect(g); g.connect(bus || this.cueBus);
+    s.start(t0); s.stop(t0 + dur + 0.03);
+    return s;
+  },
+
+  /* ---- the cues ----------------------------------------------------- */
+  /* Named for the moment, not the sound, so a hook reads as what just
+     happened in the game rather than as a noise. */
+  cues: {
+
+    /* A team hits their buzzer. Harsh, low, electrical, and the loudest
+       thing in the room — it has to cut across thirty students. */
+    buzz: function (S) {
+      S.tone(196, 0.30, 'square', 0.20);
+      S.tone(148, 0.32, 'square', 0.16, 0.015);
+      S.tone(99,  0.34, 'sawtooth', 0.10, 0.01);
+      S.noise(0.05, 0.10, 0, 1800, 700, 1.2);        /* the contact click */
+    },
+
+    /* Right answer. Two notes up, and a third that lands on the octave
+       so it sounds finished rather than merely interrupted. */
+    correct: function (S) {
+      S.tone(659, 0.12, 'sine', 0.20);
+      S.tone(880, 0.13, 'sine', 0.20, 0.10);
+      S.tone(1319, 0.30, 'sine', 0.16, 0.20);
+      S.tone(1319, 0.30, 'triangle', 0.06, 0.20);
+    },
+
+    /* Wrong answer. Deliberately NOT the buzzer — a student needs to
+       hear the difference between "your buzzer fired" and "that was
+       wrong", and on a game show those are near-identical sounds. Here
+       wrong falls, and the buzzer does not. */
+    wrong: function (S) {
+      S.tone(233, 0.28, 'sawtooth', 0.15, 0, 175);
+      S.tone(175, 0.34, 'sawtooth', 0.13, 0.09, 131);
+    },
+
+    /* Locked out — buzzed and got it wrong, so this team is out of this
+       clue. A short dead thud. Distinct from `wrong` because it lands on
+       a different team than the one being judged, and the room needs to
+       tell them apart. */
+    lockout: function (S) {
+      S.tone(110, 0.16, 'square', 0.10, 0, 82);
+      S.noise(0.10, 0.06, 0, 420, 180, 0.8);
+    },
+
+    /* The clue is live again for somebody else. Two quick notes that
+       hand it across. */
+    steal: function (S) {
+      S.tone(523, 0.08, 'triangle', 0.14);
+      S.tone(784, 0.14, 'triangle', 0.14, 0.07);
+    },
+
+    /* A tile opens. A short upward whoosh — the board moving, not a
+       musical note. */
+    clueOpen: function (S) {
+      S.noise(0.26, 0.09, 0, 300, 2600, 0.7);
+      S.tone(330, 0.18, 'triangle', 0.07, 0, 660);
+    },
+
+    /* DAILY DOUBLE. The big reveal. A fast rising flourish — harp-like,
+       which is the character the show uses — topped with a bell. */
+    dailyDouble: function (S) {
+      var scale = [392, 494, 587, 659, 784, 988, 1175, 1568];
+      scale.forEach(function (f, i) {
+        S.tone(f, 0.45, 'triangle', 0.13, i * 0.055);
+        S.tone(f * 2, 0.30, 'sine', 0.045, i * 0.055);
+      });
+      S.tone(1568, 0.9, 'sine', 0.16, 0.46);
+      S.tone(2349, 0.7, 'sine', 0.07, 0.46);
+      S.noise(0.5, 0.05, 0.46, 5000, 9000, 0.6);      /* the shimmer */
+    },
+
+    /* The wager is in. A mechanical two-part clunk — something committed
+       and cannot be taken back. */
+    wagerLocked: function (S) {
+      S.noise(0.05, 0.11, 0, 900, 500, 2);
+      S.noise(0.07, 0.09, 0.07, 500, 260, 2);
+      S.tone(330, 0.10, 'square', 0.07, 0.07);
+    },
+
+    /* Points on the board. Up for a gain, down for a deduction — so a
+       deduction is audible from the back of the room, which matters
+       because it is the one score change students argue about. */
+    pointsUp: function (S) {
+      S.tone(1047, 0.06, 'square', 0.10);
+      S.tone(1319, 0.09, 'square', 0.10, 0.05);
+      S.tone(1568, 0.14, 'square', 0.09, 0.10);
+    },
+    pointsDown: function (S) {
+      S.tone(660, 0.07, 'square', 0.10);
+      S.tone(523, 0.09, 'square', 0.10, 0.06);
+      S.tone(392, 0.16, 'square', 0.09, 0.12);
+    },
+
+    /* A student's phone has joined the room. Quiet on purpose — this one
+       fires thirty times while the class files in. */
+    join: function (S) {
+      S.tone(784, 0.07, 'sine', 0.08);
+      S.tone(1047, 0.12, 'sine', 0.08, 0.06);
+    },
+
+    /* A fresh board goes up. A rising sweep into a full chord — the
+       curtain going back. */
+    boardReveal: function (S) {
+      S.noise(0.55, 0.07, 0, 200, 3000, 0.6);
+      [262, 330, 392, 523].forEach(function (f, i) {
+        S.tone(f, 0.9, 'triangle', 0.11, 0.42 + i * 0.03);
+        S.tone(f, 0.9, 'sine', 0.05, 0.42 + i * 0.03);
+      });
+      S.tone(1047, 0.7, 'sine', 0.08, 0.52);
+    },
+
+    /* Board cleared. A short cadence that says "that is that one done"
+       without claiming the game is over. */
+    roundClear: function (S) {
+      [523, 659, 784].forEach(function (f, i) { S.tone(f, 0.5, 'triangle', 0.12, i * 0.12); });
+      S.tone(1047, 0.7, 'sine', 0.10, 0.36);
+    },
+
+    /* A team is out. Heavy, falling, and it takes its time — this is
+       somebody's game ending in front of the class. */
+    eliminated: function (S) {
+      [392, 330, 262, 196].forEach(function (f, i) {
+        S.tone(f, 0.45, 'sawtooth', 0.12, i * 0.16, f * 0.94);
+      });
+      S.tone(98, 1.1, 'triangle', 0.13, 0.62);
+      S.noise(0.8, 0.05, 0.62, 260, 90, 0.7);
+    },
+
+    /* The Lightning Final. A build, then a hit. */
+    finalStart: function (S) {
+      S.noise(1.0, 0.09, 0, 180, 2400, 0.5);          /* the rise */
+      for (var i = 0; i < 8; i++) S.tone(147 * (1 + i * 0.08), 0.12, 'sawtooth', 0.07, i * 0.11);
+      [294, 370, 440, 587].forEach(function (f) {
+        S.tone(f, 1.3, 'sawtooth', 0.11, 0.98);
+        S.tone(f / 2, 1.3, 'triangle', 0.07, 0.98);
+      });
+      S.noise(0.9, 0.09, 0.98, 3000, 600, 0.5);       /* the crash */
+    },
+
+    /* Winner. A fanfare over a crowd. The applause is thirty-odd noise
+       bursts at random offsets through two seconds — which is, near
+       enough, what a room full of people clapping actually is. */
+    winner: function (S) {
+      [523, 659, 784, 1047].forEach(function (f, i) {
+        S.tone(f, 0.28, 'square', 0.12, i * 0.10);
+        S.tone(f, 0.28, 'triangle', 0.08, i * 0.10);
+      });
+      [1047, 1319, 1568].forEach(function (f, i) {
+        S.tone(f, 1.4, 'square', 0.11, 0.44 + i * 0.02);
+        S.tone(f / 2, 1.4, 'triangle', 0.08, 0.44 + i * 0.02);
+      });
+      S.noise(2.2, 0.05, 0.10, 1400, 2000, 0.35);     /* the body of the crowd */
+      for (var i = 0; i < 34; i++) {
+        S.noise(0.035, 0.030 + Math.random() * 0.02, 0.10 + Math.random() * 2.0,
+                1600 + Math.random() * 2600, null, 1.4);
+      }
+    },
+
+    /* Out of time. Falls and stops dead. */
+    timeUp: function (S) {
+      S.tone(220, 0.20, 'sawtooth', 0.16, 0, 165);
+      S.tone(165, 0.55, 'sawtooth', 0.15, 0.16, 110);
+      S.noise(0.4, 0.06, 0.16, 300, 100, 0.7);
+    },
+
+    /* Bare tick, for the few places that want one clock beat and no bed. */
+    tick: function (S) { S.tone(1100, 0.04, 'square', 0.06); }
+  },
+
+  /** Fire a named cue. Unknown names are ignored rather than thrown, so
+      a typo in a hook is a missing sound and not a dead game. */
+  cue: function (name) {
+    if (!this.on) return false;
+    var f = this.cues[name];
+    if (!f) return false;
+    if (!this.ac()) return false;
+    f(this);
+    return true;
+  },
+
+  /* ==================================================================
+     THE COUNTDOWN BED
+
+     What it is: a steady pulse with a simple figure over it and a low
+     drone underneath, which speeds up and lifts as the clock drains.
+
+     It fits ANY window. The host can set five seconds or two minutes
+     and the bed stretches, because the scheduler reads the clock rather
+     than playing a fixed-length clip. That keeps the seconds-to-answer
+     setting meaningful instead of decorative.
+     ================================================================== */
+
+  bedStart: function (secs) {
+    this.bedStop();                       /* one bed, ever. */
+    if (!this.on || !this.music) return false;
+    var c = this.ac(); if (!c) return false;
+    secs = Math.max(1, Number(secs) || 0);
+
+    var t0 = c.currentTime + 0.03;
+    var gate = c.createGain();            /* one handle to kill the lot */
+    gate.gain.value = 1;
+    gate.connect(this.musicBus);
+
+    var bed = { gate: gate, nodes: [], timer: null, next: t0, step: 0,
+                startedAt: t0, endsAt: t0 + secs, total: secs };
+
+    /* The drone: two triangles a hair apart, which beat against each
+       other and give it a slow shimmer no single oscillator has. It
+       swells across the window so the last third feels heavier than
+       the first without anything actually changing tempo. */
+    [110, 110.7].forEach(function (f) {
+      var o = c.createOscillator(), g = c.createGain();
+      o.type = 'triangle'; o.frequency.setValueAtTime(f, t0);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.05, t0 + Math.min(1.2, secs * 0.25));
+      g.gain.exponentialRampToValueAtTime(0.10, t0 + secs);
+      o.connect(g); g.connect(gate);
+      o.start(t0); o.stop(t0 + secs + 0.4);
+      bed.nodes.push(o);
+    });
+
+    var self = this;
+    bed.timer = setInterval(function () { self._bedTick(bed); }, 40);
+    this._bed = bed;
+    this._bedTick(bed);
+    return true;
+  },
+
+  /* Schedules only what is about to be heard. Anything further out does
+     not exist yet, so stopping never has to chase it down. */
+  _bedTick: function (bed) {
+    var c = this.ctx; if (!c || this._bed !== bed) return;
+    var HORIZON = 0.2;
+
+    while (bed.next < c.currentTime + HORIZON) {
+      var left = bed.endsAt - bed.next;
+      if (left <= 0) break;                      /* the clock, not the music, decides the end */
+      var gone = 1 - (left / bed.total);         /* 0 at the start, 1 at zero */
+
+      /* Tempo: steady for most of it, then twice the rate over the last
+         five seconds — or over the last fifth, whichever is shorter, so
+         a ten-second window still gets its sprint. */
+      var sprint = Math.min(5, bed.total * 0.2);
+      var beat = (left <= sprint) ? 0.25 : 0.5;
+
+      /* The figure. Pentatonic, so it cycles without ever sounding
+         wrong, and it steps up a fifth for the sprint. */
+      var FIG = [0, 3, 5, 7, 5, 3, 7, 10];
+      var semi = FIG[bed.step % FIG.length] + (left <= sprint ? 7 : 0);
+      var f = 220 * Math.pow(2, semi / 12);
+
+      /* The pulse: a short stick hit on every beat, brighter and louder
+         as the clock runs down. */
+      this._bedNote(bed, 'noise', bed.next, 0.05, 0.05 + gone * 0.05,
+                    1200 + gone * 1400, 600, 1.6);
+      /* The melody note, on alternate beats early on and every beat once
+         it matters, so the opening is sparse and the end is busy. */
+      if (left <= sprint || bed.step % 2 === 0) {
+        this._bedNote(bed, 'tone', bed.next, Math.min(0.28, beat * 0.8),
+                      0.055 + gone * 0.03, f);
+      }
+
+      bed.next += beat;
+      bed.step++;
+    }
+  },
+
+  _bedNote: function (bed, kind, at, dur, vol, a, b, q) {
+    var c = this.ctx; if (!c) return;
+    var n;
+    if (kind === 'noise') {
+      n = c.createBufferSource(); n.buffer = this.noiseBuffer(c); n.loop = true;
+      var bp = c.createBiquadFilter();
+      bp.type = 'bandpass'; bp.Q.value = q || 1.4;
+      bp.frequency.setValueAtTime(a, at);
+      bp.frequency.exponentialRampToValueAtTime(Math.max(20, b), at + dur);
+      var g1 = c.createGain();
+      g1.gain.setValueAtTime(0.0001, at);
+      g1.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), at + 0.005);
+      g1.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      n.connect(bp); bp.connect(g1); g1.connect(bed.gate);
+    } else {
+      n = c.createOscillator(); n.type = 'triangle';
+      n.frequency.setValueAtTime(a, at);
+      var g2 = c.createGain();
+      g2.gain.setValueAtTime(0.0001, at);
+      g2.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), at + 0.01);
+      g2.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      n.connect(g2); g2.connect(bed.gate);
+    }
+    n.start(at); n.stop(at + dur + 0.05);
+    bed.nodes.push(n);
+    /* Anything already finished is dead weight; a two-minute window
+       would otherwise pile up hundreds of references. */
+    if (bed.nodes.length > 64) bed.nodes = bed.nodes.slice(-32);
+  },
+
+  /** Kill the bed. Safe to call when there is no bed, and safe to call
+      twice — both happen, because stopTimer is called defensively all
+      over the host. */
+  bedStop: function () {
+    var bed = this._bed;
+    this._bed = null;
+    if (!bed) return false;
+    if (bed.timer) clearInterval(bed.timer);
+    var c = this.ctx;
+    if (c && bed.gate) {
+      /* A short ramp rather than a hard cut — pulling a drone to silence
+         in one sample is an audible click. */
+      var t = c.currentTime;
+      try {
+        bed.gate.gain.cancelScheduledValues(t);
+        bed.gate.gain.setValueAtTime(bed.gate.gain.value, t);
+        bed.gate.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+      } catch (e) { bed.gate.gain.value = 0; }
+    }
+    bed.nodes.forEach(function (n) { try { n.stop(c ? c.currentTime + 0.09 : 0); } catch (e) {} });
+    bed.nodes.length = 0;
+    return true;
+  },
+
+  bedRunning: function () { return !!this._bed; },
+
+  /** Level the room before the class arrives: a short run through the
+      cues plus three seconds of the bed. */
+  test: function () {
+    var self = this;
+    var order = ['boardReveal', 'clueOpen', 'buzz', 'correct', 'wrong', 'dailyDouble', 'winner'];
+    order.forEach(function (name, i) { setTimeout(function () { self.cue(name); }, i * 850); });
+    setTimeout(function () { self.bedStart(3); }, order.length * 850);
+    setTimeout(function () { self.bedStop(); self.cue('timeUp'); }, order.length * 850 + 3000);
+  }
 };
+
+/* Browsers refuse to make noise until the page has been interacted
+   with. Any first click or key anywhere wakes the context so the first
+   real cue of the game is not the one that gets swallowed. */
+(function () {
+  function wake() {
+    Snd.ac();
+    document.removeEventListener('pointerdown', wake, true);
+    document.removeEventListener('keydown', wake, true);
+  }
+  document.addEventListener('pointerdown', wake, true);
+  document.addEventListener('keydown', wake, true);
+})();
+
+/* A PUBLIC HANDLE ON THE AUDIO, FOR TWO REASONS.
+
+   The practical one: if the sound misbehaves on a projector in front of
+   a class, FACEOFF_SOUND.on = false from the console kills it in a
+   second without reloading the game and losing the board.
+
+   The other one: bedStart calls bedStop on itself before doing anything,
+   so that two beds can never run at once. Nothing in the game reaches
+   that guard today — every path that starts the clock has already
+   stopped it — which means it is defensive code, and defensive code
+   that cannot be reached also cannot be tested through the interface.
+   Exposing the engine lets verify/sound.mjs call bedStart twice on
+   purpose and prove the guard actually holds, rather than taking it on
+   trust because nothing has broken yet. */
+window.FACEOFF_SOUND = Snd;
 
 /* ------------------------------------------------------------------ */
 /* transports                                                          */
@@ -894,7 +1353,10 @@ function Host(forcedCode) {
     room: forcedCode || (saved && saved.room) || roomCode(),
     settings: Object.assign({
       teamCount: 8, teamSize: 5, answerSecs: 15, lightningSecs: 10,
-      lengthMinutes: 60, minWager: 100, deduct: false, sound: true,
+      lengthMinutes: 60, minWager: 100, deduct: false,
+      /* sound = the cues. music = the countdown bed, which some rooms
+         want off while keeping the buzzer. volume is the whole lot. */
+      sound: true, music: true, volume: 0.7,
       /* null means "let the bracket decide". A number means the host has
          said how many boards to play, and that wins over the bracket. */
       rounds: null,
@@ -922,6 +1384,8 @@ function Host(forcedCode) {
     settingsOpen: false
   };
   Snd.on = S.settings.sound;
+  Snd.music = S.settings.music !== false;      /* older saved settings predate it */
+  Snd.setVolume(S.settings.volume == null ? 0.7 : S.settings.volume);
 
   function makeTeams(n) {
     var old = S.teams.slice();
@@ -1021,23 +1485,35 @@ function Host(forcedCode) {
   function sync() { pubState(); pubTimer(); render(); }
 
   /* ---------- timer ---------- */
+  /* THE ANSWER CLOCK IS THE BED'S ONLY OWNER.
+
+     Starting the clock starts the music and stopping the clock stops
+     it, with no other caller on either side. That is what makes it
+     impossible for the bed to play on under the next clue: every way a
+     clue can end already runs through stopTimer. */
   function startTimer(secs) {
     S.timer = { running: true, endsAt: Date.now() + secs * 1000, total: secs };
     if (tickHandle) clearInterval(tickHandle);
     var lastWhole = secs;
+    Snd.bedStart(secs);
     tickHandle = setInterval(function () {
       var left = S.timer.endsAt - Date.now();
       var whole = Math.ceil(left / 1000);
-      if (whole !== lastWhole && whole > 0 && whole <= 5) Snd.tick();
+      /* With the bed on, the last five seconds are already urgent. With
+         music switched off they would be silence, so the bare tick
+         stands in — nobody should lose the clock because they turned
+         the music down. */
+      if (whole !== lastWhole && whole > 0 && whole <= 5 && !Snd.music) Snd.cue('tick');
       lastWhole = whole;
       paintTimer();
-      if (left <= 0) { stopTimer(); Snd.timeup(); onExpire(); }
+      if (left <= 0) { stopTimer(); Snd.cue('timeUp'); onExpire(); }
     }, 100);
     pubTimer();
   }
   function stopTimer() {
     S.timer.running = false;
     if (tickHandle) { clearInterval(tickHandle); tickHandle = null; }
+    Snd.bedStop();
     pubTimer();
   }
   function timeLeft() { return S.timer.running ? Math.max(0, S.timer.endsAt - Date.now()) : 0; }
@@ -1076,6 +1552,10 @@ function Host(forcedCode) {
           if (t.members.length >= S.settings.teamSize) return;
           t.members.push({ id: a.memberId, name: a.name });
           if (!t.captain) t.captain = a.memberId;
+          /* Only a NEW arrival. A refresh or a rejoin lands in the two
+             branches above, and chiming for those would have the room
+             pinging every time somebody's screen locks. */
+          Snd.cue('join');
         }
         sync(); break;
 
@@ -1114,7 +1594,7 @@ function Host(forcedCode) {
     if (S.buzzOrder.indexOf(teamId) >= 0) return;
     S.buzzOrder.push(teamId);
     if (!S.current) {
-      S.current = teamId; S.phase = 'answering'; Snd.buzz(); startTimer(answerSecondsNow());
+      S.current = teamId; S.phase = 'answering'; Snd.cue('buzz'); startTimer(answerSecondsNow());
     }
     sync();
   }
@@ -1135,6 +1615,7 @@ function Host(forcedCode) {
     S.ddWager = Math.max(min, Math.min(max, parseInt(amt, 10) || min));
     S.active.value = S.ddWager;
     S.phase = 'ddclue';
+    Snd.cue('wagerLocked');
     startTimer(answerSecondsNow());
     sync();
   }
@@ -1166,9 +1647,10 @@ function Host(forcedCode) {
         else S.control = d.slice().sort(function (x, y) { return bestFirst(team(x), team(y)); })[0] || null;
       }
       if (!S.control) { flash('Pick which team has control first (click a team card)', 'bad'); S.active = null; return; }
-      S.phase = 'ddwager'; Snd.dd();
+      S.phase = 'ddwager'; Snd.cue('dailyDouble');
     } else {
       S.phase = 'clue';
+      Snd.cue('clueOpen');
     }
     sync();
   }
@@ -1178,13 +1660,14 @@ function Host(forcedCode) {
     var who = isDDp ? S.control : S.current;
     var t = team(who); if (!t) return;
     if (correct) {
-      t.score += val; t.right = (t.right || 0) + 1; Snd.correct();
+      t.score += val; t.right = (t.right || 0) + 1;
+      Snd.cue('correct'); Snd.cue('pointsUp');
       if (!S.lightning) { S.control = who; S.active.clue.done = true; }
       S.reveal = true; S.phase = 'reveal'; stopTimer();
     } else {
-      Snd.wrong();
+      Snd.cue('wrong');
       t.wrong = (t.wrong || 0) + 1;
-      if (S.settings.deduct) t.score -= val;
+      if (S.settings.deduct) { t.score -= val; Snd.cue('pointsDown'); }
       if (isDDp) {                                    // no steal on a Daily Double
         if (!S.lightning) S.active.clue.done = true;
         S.reveal = true; S.phase = 'reveal'; stopTimer();
@@ -1198,7 +1681,12 @@ function Host(forcedCode) {
         var eligible = duelTeams() ? duelTeams().map(team).filter(Boolean) : aliveTeams();
         var remaining = eligible.filter(function (x) { return S.lockedOut.indexOf(x.id) < 0; });
         if (remaining.length) {
+          /* Two different things just happened to two different teams:
+             one is shut out of this clue, and the clue is live again for
+             somebody else. They get their own sounds. */
+          Snd.cue('lockout');
           S.phase = 'clue'; stopTimer();
+          Snd.cue('steal');
           if (S.lightning) startTimer(S.settings.lightningSecs);
           flash(S.lightning ? 'Open to the other finalist'
                 : duelTeams() ? 'STEAL — open to ' + esc(remaining[0].name)
@@ -1229,7 +1717,7 @@ function Host(forcedCode) {
     if (S.lightning) { nextLightning(); return; }
     S.phase = 'board';
     sync();
-    if (roundCleared()) endRound();
+    if (roundCleared()) { Snd.cue('roundClear'); endRound(); }
   }
   /* Redeal every student who has joined across the teams at random. Deals
      round-robin out of a shuffled pool so team sizes stay within one of each
@@ -1370,6 +1858,7 @@ function Host(forcedCode) {
     persist();                    /* remember what this board just used up */
     makePairs();                  /* re-seed the A-vs-B matchups for this round */
     S.phase = 'board';
+    Snd.cue('boardReveal');
     S.active = null; S.reveal = false;
     S.buzzOrder = []; S.lockedOut = []; S.current = null; S.answers = {};
     stopTimer(); sync();
@@ -1521,7 +2010,7 @@ function Host(forcedCode) {
     });
     S.tour.cut = [];
     if (S.control && !isAlive(S.control)) S.control = null;
-    Snd.wrong();
+    Snd.cue('eliminated');
     if (bracketDone()) { startLightning(); return; }
     S.tour.stage++;
     dealBoard();
@@ -1540,7 +2029,7 @@ function Host(forcedCode) {
     S.tour.board = [];
     S.control = null;
     S.phase = 'board';
-    Snd.dd();
+    Snd.cue('finalStart');
     stopTimer(); sync();
   }
 
@@ -1576,7 +2065,7 @@ function Host(forcedCode) {
         .concat(S.tour.out);
       S.tour.alive = [winner.id];
     }
-    Snd.correct();
+    Snd.cue('winner');
     stopTimer(); sync();
   }
 
@@ -2129,7 +2618,29 @@ function Host(forcedCode) {
       '</div>' : '') +
       '<div class="row" style="margin-top:13px;gap:20px">' +
         '<label><input type="checkbox" id="setDeduct"' + (S.settings.deduct ? ' checked' : '') + '> Deduct points for a wrong answer</label>' +
-        '<label><input type="checkbox" id="setSound"' + (S.settings.sound ? ' checked' : '') + '> Sound effects</label>' +
+      '</div>' +
+      /* SOUND, WITH THE ROOM IN MIND.
+
+         Two switches rather than one, because the buzzer and the
+         countdown music are wanted in different amounts — a room next
+         to another class often wants the cues and not the bed. And a
+         Test button, so the level gets set against the actual speakers
+         before thirty students walk in rather than during the first
+         clue. */
+      '<div class="notice" style="margin-top:13px">' +
+        '<div class="row" style="gap:20px;flex-wrap:wrap">' +
+          '<label><input type="checkbox" id="setSound"' + (S.settings.sound ? ' checked' : '') + '> <b>Sound effects</b> — buzzer, right, wrong, Daily Double</label>' +
+          '<label><input type="checkbox" id="setMusic"' + (S.settings.music !== false ? ' checked' : '') + '> <b>Countdown music</b> — runs the whole answer clock</label>' +
+        '</div>' +
+        '<div class="row" style="gap:12px;margin-top:10px;align-items:center;flex-wrap:wrap">' +
+          '<label class="fld" for="setVol" style="margin:0">Volume</label>' +
+          '<input id="setVol" type="range" min="0" max="100" step="5" style="flex:1;min-width:180px" ' +
+            'value="' + Math.round((S.settings.volume == null ? 0.7 : S.settings.volume) * 100) + '">' +
+          '<span class="mono" id="setVolNum">' + Math.round((S.settings.volume == null ? 0.7 : S.settings.volume) * 100) + '%</span>' +
+          '<button class="btn" data-act="testsnd" type="button">Test sounds</button>' +
+        '</div>' +
+        '<div style="margin-top:8px;font-size:13px">Turning the music off leaves a plain tick on the last five seconds, ' +
+          'so the clock is never silent. Every sound is generated in the browser — there are no audio files to load.</div>' +
       '</div>' +
       '<div class="notice" style="margin-top:13px">' +
         '<b>Room:</b> ' + (S.settings.teamCount * S.settings.teamSize) + ' students (' +
@@ -2265,7 +2776,11 @@ function Host(forcedCode) {
     }
     if ((el = e.target.closest('[data-adj]'))) {
       e.stopPropagation();
-      var t = team(el.getAttribute('data-adj')); t.score += parseInt(el.getAttribute('data-d'), 10); sync(); return;
+      var t = team(el.getAttribute('data-adj'));
+      var d = parseInt(el.getAttribute('data-d'), 10);
+      t.score += d;
+      Snd.cue(d < 0 ? 'pointsDown' : 'pointsUp');
+      sync(); return;
     }
     if ((el = e.target.closest('[data-cls]'))) {
       e.stopPropagation();
@@ -2319,6 +2834,15 @@ function Host(forcedCode) {
         }
         S.settings.deduct = $('#setDeduct').checked;
         S.settings.sound = $('#setSound').checked; Snd.on = S.settings.sound;
+        if ($('#setMusic')) { S.settings.music = $('#setMusic').checked; Snd.music = S.settings.music; }
+        if ($('#setVol')) {
+          S.settings.volume = Math.max(0, Math.min(1, (parseInt($('#setVol').value, 10) || 0) / 100));
+          Snd.setVolume(S.settings.volume);
+        }
+        /* A bed playing while the host saves "music off" would carry on
+           to the end of the clue, which is exactly the sort of thing
+           that makes a setting look broken. */
+        if (!Snd.on || !Snd.music) Snd.bedStop();
         S.settings.classMode = $('#setClass').checked;
         /* Which pool we are dealing from. Falls back to the question bank
            rather than to whatever was checked, so a build shipped without an
@@ -2330,6 +2854,14 @@ function Host(forcedCode) {
         if ($('#setClsA')) S.settings.classA = ($('#setClsA').value || 'CLASS A').slice(0, 18);
         if ($('#setClsB')) S.settings.classB = ($('#setClsB').value || 'CLASS B').slice(0, 18);
         makeTeams(S.settings.teamCount); persist(); S.settingsOpen = false; sync(); break;
+      case 'testsnd':
+        /* Tests what is ON SCREEN, not what was last saved, so dragging
+           the slider and pressing Test does what the host expects. */
+        Snd.on = $('#setSound') ? $('#setSound').checked : Snd.on;
+        Snd.music = $('#setMusic') ? $('#setMusic').checked : Snd.music;
+        if ($('#setVol')) Snd.setVolume((parseInt($('#setVol').value, 10) || 0) / 100);
+        Snd.test();
+        break;
       case 'full':
         if (document.fullscreenElement) document.exitFullscreen();
         else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
@@ -2404,6 +2936,14 @@ function Host(forcedCode) {
     }
   });
   app.addEventListener('input', function (e) {
+    if (e.target.id === 'setVol') {
+      /* Live, so the host hears the change while the slider moves
+         instead of having to save and reopen to find out. */
+      var pc = parseInt(e.target.value, 10) || 0;
+      Snd.setVolume(pc / 100);
+      var out = $('#setVolNum'); if (out) out.textContent = pc + '%';
+      return;
+    }
     if (e.target.id !== 'setRounds') return;
     /* Blank means auto, so the preview has to fall back to what the
        bracket would take rather than showing 1. The field is never
@@ -2826,7 +3366,10 @@ function Player(code, seat) {
         draft.tname = $('#tname').value;
         send({ type: 'teamname', teamId: t.id, name: draft.tname }); flash('Team name set', 'good'); break;
       case 'buzz':
-        send({ type: 'buzz', teamId: t.id }); Snd.buzz();
+        /* The student's own handset confirms their tap registered. The
+           music and everything else stays on the board — thirty phones
+           running countdown music out of sync would be unusable. */
+        send({ type: 'buzz', teamId: t.id }); Snd.cue('buzz');
         el.disabled = true; el.textContent = 'BUZZED!'; break;
       case 'answer':
         draft.answer = $('#ans').value;
