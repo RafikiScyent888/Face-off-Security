@@ -138,6 +138,29 @@ Seconds to answer, Lightning Final seconds, minimum Daily Double wager, sound
 on/off, and whether a wrong answer **deducts** points (off by default — with
 open steals, deducting punishes the teams brave enough to buzz).
 
+### Answer music (your own think music)
+
+In ⚙ Game settings, **Load answer music…** lets the host pick an MP3 or WAV
+from their own computer. From then on:
+
+- it starts the moment a team buzzes, and stops the moment you judge the
+  answer, reveal it, or the clock runs out
+- it is stretched to fit **Seconds to answer**, ending as the clock hits
+  zero:
+  - a shorter window plays the clip's last seconds, or the whole clip a
+    little faster (up to 1.25×)
+  - a longer window slows it down (the pitch stays the same), or plays it
+    two, three or four times, with the last pass ending on zero
+- the file stays in that browser on that computer (IndexedDB). It is
+  **never uploaded and never part of this repo**, so a recording someone
+  else owns is not republished on the open web
+- every Face Off game shares the same github.io address, so loading it once
+  makes it play in all five games on that computer
+- **Remove** puts back the game's own generated countdown, which is also
+  what plays when no music has been loaded
+
+The *Countdown music* switch and the volume slider apply to it as well.
+
 You can also nudge any score by hovering a team card and clicking **+ / −**, and
 click any team card to hand them board control.
 
