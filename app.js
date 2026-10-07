@@ -427,16 +427,60 @@ var Snd = {
   },
 
   /* ==================================================================
-     THE COUNTDOWN BED
+     THE COUNTDOWN BED: THE FACE OFF THINK CUE (owner, 7 October 2026)
 
-     What it is: a steady pulse with a simple figure over it and a low
-     drone underneath, which speeds up and lifts as the clock drains.
+     An original think cue: a wooden tick-tock on every beat, a plucked
+     bass on 1 and 3, soft chords on 2 and 4, a marimba tune of our own,
+     and a "ba-DUM" button that lands exactly as the clock hits zero.
+     128 bpm; 16 bars is 30 seconds. It is not the game show's cue and
+     borrows none of its notes. The owner heard it as a preview first.
 
-     It fits ANY window. The host can set five seconds or two minutes
-     and the bed stretches, because the scheduler reads the clock rather
-     than playing a fixed-length clip. That keeps the seconds-to-answer
-     setting meaningful instead of decorative.
+     It fits ANY window and always ends on zero, at the same tempo:
+       - the tune is an opening (4 bars), a middle (8 bars) and an
+         ending (4 bars + the button), 30 seconds in all
+       - a longer window repeats the middle as often as it takes
+         (45 s plays it twice, 120 s seven times)
+       - it then starts part way in, so the DUM lands on zero: 15
+         seconds to answer begins at bar 9 (cueScore)
+     A file the host loads (below) plays instead, when there is one.
      ================================================================== */
+  CUE_BPM: 128,
+
+  /** Every note of the cue for a window of `secs`, as times from the
+      buzz. Pure, so it can be checked without a browser. */
+  cueScore: function (secs) {
+    var BEAT = 60 / this.CUE_BPM, E = BEAT / 2, BAR = 4 * BEAT;
+    var TUNE = [
+      'C5 - A4 Bb4 C5 - F5 -', 'E5 - D5 C5 D5 - . .', 'C5 - A4 F4 G4 - A4 -', 'G4 - - - . . . .',
+      'C5 - A4 Bb4 C5 - F5 -', 'G5 - F5 E5 F5 - D5 -', 'C5 - A4 G4 A4 - G4 -', 'F4 - - - . . . .',
+      'D5 - E5 F5 E5 - D5 -', 'C5 - A4 C5 Bb4 - . .', 'Bb4 - C5 D5 C5 - Bb4 -', 'A4 - G4 - A4 - . .',
+      'C5 - A4 Bb4 C5 - F5 -', 'G5 - F5 E5 D5 - C5 -', 'A4 - G4 - E4 - G4 -', 'A4 Bb4 B4 C5 D5 E5 . .'];
+    var CH = ['F', 'Bb', 'F', 'C7', 'F', 'Bb', 'C7', 'F', 'Dm', 'F', 'Gm', 'C7', 'F', 'Bb', 'C7', 'C7'];
+    var CHORDS = { F: ['F2', 'C3', ['A3', 'C4', 'F4']], Bb: ['Bb1', 'F2', ['Bb3', 'D4', 'F4']], C7: ['C2', 'G2', ['Bb3', 'E4', 'G4']],
+                   Dm: ['D2', 'A2', ['A3', 'D4', 'F4']], Gm: ['G2', 'D3', ['Bb3', 'D4', 'G4']] };
+    function hz(n) { var m = /^([A-G])(b|#)?(\d)$/.exec(n), st = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[m[1]] + (m[2] === 'b' ? -1 : m[2] === '#' ? 1 : 0);
+      return 440 * Math.pow(2, (st + 12 * (+m[3] + 1) - 69) / 12); }
+    secs = Math.max(1, Number(secs) || 0);
+    var reps = Math.max(1, Math.ceil((secs - 15) / 15));
+    var order = [0, 1, 2, 3]; for (var r = 0; r < reps; r++) order = order.concat([4, 5, 6, 7, 8, 9, 10, 11]);
+    order = order.concat([12, 13, 14, 15]);
+    var total = order.length * BAR, skip = total - secs, ev = [];
+    function at(t, e) { if (t >= skip - 1e-6) { e.t = t - skip; ev.push(e); } }
+    order.forEach(function (b, k) {
+      var tb = k * BAR, c = CHORDS[CH[b]];
+      at(tb, { k: 'bass', f: hz(c[0]) }); at(tb + 2 * BEAT, { k: 'bass', f: hz(c[1]) });
+      if (b < 15) { at(tb + BEAT, { k: 'chord', fs: c[2].map(hz) }); at(tb + 3 * BEAT, { k: 'chord', fs: c[2].map(hz) }); }
+      for (var q = 0; q < 4; q++) at(tb + q * BEAT, { k: 'tick', hi: q % 2 === 0 });
+      var toks = TUNE[b].split(' ');
+      toks.forEach(function (tk, i) { if (tk === '-' || tk === '.') return; var len = 1; while (toks[i + len] === '-') len++; at(tb + i * E, { k: 'mar', f: hz(tk), len: len * E }); });
+    });
+    /* the button: ba on the last beat, DUM on zero */
+    at(total - BEAT, { k: 'brass', fs: ['C3', 'G3', 'Bb3', 'E4'].map(hz), len: 0.16, v: 0.05 }); at(total - BEAT, { k: 'timp', f: hz('C2') });
+    at(total, { k: 'brass', fs: ['F2', 'C3', 'F3', 'A3', 'C4', 'F4'].map(hz), len: 1.1, v: 0.06, dum: true }); at(total, { k: 'timp', f: hz('F1') });
+    at(total, { k: 'mar', f: hz('F5'), len: 4 * E }); at(total, { k: 'mar', f: hz('F4'), len: 4 * E });
+    ev.sort(function (a, b) { return a.t - b.t; });
+    return { events: ev, total: total, skip: skip, reps: reps, dumAt: secs };
+  },
 
   /* ==================================================================
      ANSWER MUSIC THE HOST LOADS (owner, 7 October 2026)
@@ -446,7 +490,7 @@ var Snd = {
      never goes in this public repo: the host loads the file on their
      own computer (Game settings → Load answer music…), it is kept in
      that browser's IndexedDB, and it is never uploaded anywhere. With
-     none loaded, the generated bed below plays, exactly as before.
+     none loaded, the Face Off think cue above plays.
 
      It still has ONE owner, the answer clock: bedStart plays it and
      bedStop stops it, so every way a clue ends stops the music.
@@ -536,25 +580,9 @@ var Snd = {
     var gate = c.createGain();            /* one handle to kill the lot */
     gate.gain.value = 1;
     gate.connect(this.musicBus);
-
-    var bed = { gate: gate, nodes: [], timer: null, next: t0, step: 0,
-                startedAt: t0, endsAt: t0 + secs, total: secs };
-
-    /* The drone: two triangles a hair apart, which beat against each
-       other and give it a slow shimmer no single oscillator has. It
-       swells across the window so the last third feels heavier than
-       the first without anything actually changing tempo. */
-    [110, 110.7].forEach(function (f) {
-      var o = c.createOscillator(), g = c.createGain();
-      o.type = 'triangle'; o.frequency.setValueAtTime(f, t0);
-      g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(0.05, t0 + Math.min(1.2, secs * 0.25));
-      g.gain.exponentialRampToValueAtTime(0.10, t0 + secs);
-      o.connect(g); g.connect(gate);
-      o.start(t0); o.stop(t0 + secs + 0.4);
-      bed.nodes.push(o);
-    });
-
+    var score = this.cueScore(secs);
+    var bed = { gate: gate, nodes: [], timer: null, t0: t0, ev: score.events, i: 0,
+                dumAt: t0 + score.dumAt, total: secs };
     var self = this;
     bed.timer = setInterval(function () { self._bedTick(bed); }, 40);
     this._bed = bed;
@@ -567,69 +595,41 @@ var Snd = {
   _bedTick: function (bed) {
     var c = this.ctx; if (!c || this._bed !== bed) return;
     var HORIZON = 0.2;
-
-    while (bed.next < c.currentTime + HORIZON) {
-      var left = bed.endsAt - bed.next;
-      if (left <= 0) break;                      /* the clock, not the music, decides the end */
-      var gone = 1 - (left / bed.total);         /* 0 at the start, 1 at zero */
-
-      /* Tempo: steady for most of it, then twice the rate over the last
-         five seconds — or over the last fifth, whichever is shorter, so
-         a ten-second window still gets its sprint. */
-      var sprint = Math.min(5, bed.total * 0.2);
-      var beat = (left <= sprint) ? 0.25 : 0.5;
-
-      /* The figure. Pentatonic, so it cycles without ever sounding
-         wrong, and it steps up a fifth for the sprint. */
-      var FIG = [0, 3, 5, 7, 5, 3, 7, 10];
-      var semi = FIG[bed.step % FIG.length] + (left <= sprint ? 7 : 0);
-      var f = 220 * Math.pow(2, semi / 12);
-
-      /* The pulse: a short stick hit on every beat, brighter and louder
-         as the clock runs down. */
-      this._bedNote(bed, 'noise', bed.next, 0.05, 0.05 + gone * 0.05,
-                    1200 + gone * 1400, 600, 1.6);
-      /* The melody note, on alternate beats early on and every beat once
-         it matters, so the opening is sparse and the end is busy. */
-      if (left <= sprint || bed.step % 2 === 0) {
-        this._bedNote(bed, 'tone', bed.next, Math.min(0.28, beat * 0.8),
-                      0.055 + gone * 0.03, f);
-      }
-
-      bed.next += beat;
-      bed.step++;
+    while (bed.i < bed.ev.length && bed.t0 + bed.ev[bed.i].t < c.currentTime + HORIZON) {
+      var e = bed.ev[bed.i++], at = Math.max(c.currentTime, bed.t0 + e.t);
+      this._cueNote(bed, e, at);
     }
+    if (bed.i >= bed.ev.length && bed.timer) { clearInterval(bed.timer); bed.timer = null; }
   },
 
-  _bedNote: function (bed, kind, at, dur, vol, a, b, q) {
-    var c = this.ctx; if (!c) return;
-    var n;
-    if (kind === 'noise') {
-      n = c.createBufferSource(); n.buffer = this.noiseBuffer(c); n.loop = true;
-      var bp = c.createBiquadFilter();
-      bp.type = 'bandpass'; bp.Q.value = q || 1.4;
-      bp.frequency.setValueAtTime(a, at);
-      bp.frequency.exponentialRampToValueAtTime(Math.max(20, b), at + dur);
-      var g1 = c.createGain();
-      g1.gain.setValueAtTime(0.0001, at);
-      g1.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), at + 0.005);
-      g1.gain.exponentialRampToValueAtTime(0.0001, at + dur);
-      n.connect(bp); bp.connect(g1); g1.connect(bed.gate);
-    } else {
-      n = c.createOscillator(); n.type = 'triangle';
-      n.frequency.setValueAtTime(a, at);
-      var g2 = c.createGain();
-      g2.gain.setValueAtTime(0.0001, at);
-      g2.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol), at + 0.01);
-      g2.gain.exponentialRampToValueAtTime(0.0001, at + dur);
-      n.connect(g2); g2.connect(bed.gate);
+  /* One note of the cue, into the bed's gate. Levels sit under the cues,
+     as the old bed did: the buzzer must always be heard over it. */
+  _cueNote: function (bed, e, at) {
+    var c = this.ctx, self = this, V = 0.42;
+    function voice(type, f, peak, a, d, lp, glideFrom) {
+      var o = c.createOscillator(), g = c.createGain(), node = o;
+      o.type = type;
+      if (glideFrom) { o.frequency.setValueAtTime(glideFrom, at); o.frequency.exponentialRampToValueAtTime(f, at + 0.08); } else o.frequency.setValueAtTime(f, at);
+      if (lp) { var fl = c.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = lp; o.connect(fl); node = fl; }
+      node.connect(g); g.connect(bed.gate);
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak * V), at + a);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + a + d);
+      o.start(at); o.stop(at + a + d + 0.05);
+      bed.nodes.push(o);
     }
-    n.start(at); n.stop(at + dur + 0.05);
-    bed.nodes.push(n);
-    /* Anything already finished is dead weight; a two-minute window
-       would otherwise pile up hundreds of references. */
-    if (bed.nodes.length > 64) bed.nodes = bed.nodes.slice(-32);
+    if (e.k === 'mar') { var d = Math.min(0.9, 0.35 + e.len * 0.6); voice('sine', e.f, 0.30, 0.004, d); voice('sine', e.f * 3.93, 0.05, 0.002, 0.08); voice('sine', e.f * 2, 0.04, 0.003, d * 0.5); }
+    else if (e.k === 'bass') { voice('triangle', e.f, 0.32, 0.006, 0.42, 900); voice('sine', e.f / 2, 0.14, 0.006, 0.3); }
+    else if (e.k === 'chord') e.fs.forEach(function (f) { voice('sine', f, 0.045, 0.01, 0.28); });
+    else if (e.k === 'tick') { var f = e.hi ? 1650 : 1250; voice('sine', f, 0.10, 0.001, 0.035); voice('square', f * 1.5, 0.012, 0.001, 0.012, 4000); }
+    else if (e.k === 'brass') e.fs.forEach(function (f) { voice('sawtooth', f, e.v, 0.012, e.len, 1800); voice('sawtooth', f * 1.003, e.v * 0.6, 0.012, e.len, 1600); });
+    else if (e.k === 'timp') voice('sine', e.f, 0.5, 0.005, 1.4, 0, e.f * 1.15);
+    if (bed.nodes.length > 160) bed.nodes = bed.nodes.slice(-96);
   },
+
+  /** True once the cue's DUM has sounded: the clock ran out on the music,
+      so it rings out and the separate time's-up sound is not needed. */
+  bedLanded: function () { var b = this._bed, c = this.ctx; return !!(b && b.dumAt && c && c.currentTime >= b.dumAt - 0.15); },
 
   /** Kill the bed. Safe to call when there is no bed, and safe to call
       twice — both happen, because stopTimer is called defensively all
@@ -642,6 +642,13 @@ var Snd = {
     /* the loaded answer music: pause it just after the gate has faded */
     if (bed.el) { var el = bed.el; el.onended = null; setTimeout(function () { if (Snd._bed && Snd._bed.el === el) return; el.pause(); }, 90); }
     var c = this.ctx;
+    /* The clock ran out on the cue's DUM: let it ring out, don't cut it */
+    var ring = !!(c && bed.dumAt && c.currentTime >= bed.dumAt - 0.15);
+    if (ring) {
+      var tr = c.currentTime;
+      try { bed.gate.gain.cancelScheduledValues(tr); bed.gate.gain.setValueAtTime(bed.gate.gain.value, tr); bed.gate.gain.exponentialRampToValueAtTime(0.0001, tr + 1.6); } catch (e) {}
+      bed.nodes.length = 0; return true;
+    }
     if (c && bed.gate) {
       /* A short ramp rather than a hard cut — pulling a drone to silence
          in one sample is an audible click. */
@@ -666,7 +673,7 @@ var Snd = {
     var order = ['boardReveal', 'clueOpen', 'buzz', 'correct', 'wrong', 'dailyDouble', 'winner'];
     order.forEach(function (name, i) { setTimeout(function () { self.cue(name); }, i * 850); });
     setTimeout(function () { self.bedStart(3); }, order.length * 850);
-    setTimeout(function () { self.bedStop(); self.cue('timeUp'); }, order.length * 850 + 3000);
+    setTimeout(function () { var landed = self.bedLanded(); self.bedStop(); if (!landed) self.cue('timeUp'); }, order.length * 850 + 3000);
   }
 };
 
@@ -1635,7 +1642,8 @@ function Host(forcedCode) {
       if (whole !== lastWhole && whole > 0 && whole <= 5 && !Snd.music) Snd.cue('tick');
       lastWhole = whole;
       paintTimer();
-      if (left <= 0) { stopTimer(); Snd.cue('timeUp'); onExpire(); }
+      /* the think cue's DUM is the time's-up sound when it has just played */
+      if (left <= 0) { var landed = Snd.bedLanded(); stopTimer(); if (!landed) Snd.cue('timeUp'); onExpire(); }
     }, 100);
     pubTimer();
   }

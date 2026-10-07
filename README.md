@@ -138,6 +138,16 @@ Seconds to answer, Lightning Final seconds, minimum Daily Double wager, sound
 on/off, and whether a wrong answer **deducts** points (off by default — with
 open steals, deducting punishes the teams brave enough to buzz).
 
+### The think cue (built in)
+
+While a team answers, the game plays its own think cue: a ticking clock, a
+plucked bass, soft chords and a marimba tune written for Face Off, ending
+"ba-DUM" exactly as the clock hits zero. It is generated in the browser, so
+there is no file to load. It fits any **Seconds to answer** at the same
+tempo: 30 seconds is the whole cue, a longer time repeats its middle, and a
+shorter time starts part way in. When the clock runs out, the DUM rings out
+in place of the time's-up sound. Judge the answer early and it stops at once.
+
 ### Answer music (your own think music)
 
 In ⚙ Game settings, **Load answer music…** lets the host pick an MP3 or WAV
@@ -156,8 +166,8 @@ from their own computer. From then on:
   else owns is not republished on the open web
 - every Face Off game shares the same github.io address, so loading it once
   makes it play in all five games on that computer
-- **Remove** puts back the game's own generated countdown, which is also
-  what plays when no music has been loaded
+- **Remove** puts back the built-in think cue, which is also what plays
+  when no music has been loaded
 
 The *Countdown music* switch and the volume slider apply to it as well.
 

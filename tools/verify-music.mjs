@@ -16,7 +16,14 @@
      BUZZ     nothing plays while the clue is read; a buzz starts the clip
               at the planned place and speed
      STOP     judging the answer stops it; so does the clock running out
-     REMOVE   Remove puts back the generated countdown */
+     REMOVE   Remove puts back the built-in think cue
+     CUE      the think cue lands its DUM exactly on zero for every window
+              from 5 s to 120 s, keeps the clock ticking, plays nothing
+              outside the window; 30 s is the whole cue as previewed; a
+              buzz with nothing loaded plays it
+     RING     when the clock runs out on the DUM it rings and the falling
+              time's-up sound is not laid over it; judged before zero, it
+              stops at once */
 import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path'; import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -50,9 +57,9 @@ function toneWav(secs) {
 
 async function run(rewrites) {
   const fails = []; const F = (m) => fails.push(m);
-  const s = serve(rewrites), B = await launch();
+  const s = serve(rewrites), B = await launch(); let pg = null;
   try {
-    const ctx = await B.newContext({ viewport: { width: 1400, height: 950 } }); const p = await ctx.newPage();
+    const ctx = await B.newContext({ viewport: { width: 1400, height: 950 } }); const p = await ctx.newPage(); pg = p;
     p.on('pageerror', (e) => F('PAGE: ' + e.message));
     await p.goto(s.url + '/index.html#/host'); await p.waitForTimeout(600);
 
@@ -82,8 +89,11 @@ async function run(rewrites) {
     /* BUZZ: start a game, open a clue, buzz */
     await p.locator('[data-act="start"]').first().click().catch(() => {});
     await p.waitForTimeout(400);
+    /* back to the board from a revealed clue, if that's where we are */
+    async function toBoard() { const m = p.getByRole('button', { name: /Show answer & move on/ }); if (await m.count()) { await m.first().click(); await p.waitForTimeout(300); }
+      const b = p.getByRole('button', { name: /Back to board/ }); if (await b.count()) { await b.first().click(); await p.waitForTimeout(300); } }
     async function openAndBuzz() {
-      await p.locator('[data-clue]').first().click(); await p.waitForTimeout(300);
+      await p.locator('[data-clue]').filter({ hasText: /\d/ }).first().click(); await p.waitForTimeout(300);
       const before = await p.evaluate(() => { const b = window.FACEOFF_SOUND._bed; return !!b; });
       for (const k of ['1', '2', '3', '4', '5', '6', '7', '8']) { await p.keyboard.press(k); await p.waitForTimeout(80); if (await p.evaluate(() => !!window.FACEOFF_SOUND._bed)) break; }
       await p.waitForTimeout(400);
@@ -114,8 +124,7 @@ async function run(rewrites) {
     await p.evaluate(() => window.FACEOFF_SOUND.bedStop());
 
     /* REMOVE */
-    await p.keyboard.press('Space').catch(() => {}); await p.waitForTimeout(200);
-    await p.locator('[data-act="settings"]').first().click();
+    await toBoard(); await p.locator('[data-act="settings"]').first().click();
     await p.locator('[data-act="clipclear"]').click(); await p.waitForTimeout(300);
     if (await p.evaluate(() => window.FACEOFF_SOUND.clipReady())) F('REMOVE: the music is still loaded');
     if (!/none loaded/.test(await p.locator('#clipRow').innerText())) F('REMOVE: the row still names a file');
@@ -124,7 +133,44 @@ async function run(rewrites) {
     await p.evaluate(() => window.FACEOFF_SOUND.bedStop());
     await p.reload(); await p.waitForTimeout(500);
     if (await p.evaluate(() => window.FACEOFF_SOUND.clipReady())) F('REMOVE: the music came back after a reload');
-  } catch (e) { F('DRIVE: ' + String(e.message).split('\n')[0]); }
+
+    /* CUE: the built-in think cue, for every window from 5 s to 120 s */
+    const sc = await p.evaluate(() => { const S = window.FACEOFF_SOUND, BEAT = 60 / S.CUE_BPM, out = [];
+      for (let W = 5; W <= 120; W++) { const r = S.cueScore(W), dums = r.events.filter((e) => e.dum), ticks = r.events.filter((e) => e.k === 'tick');
+        let gap = 0; for (let i = 1; i < ticks.length; i++) gap = Math.max(gap, ticks[i].t - ticks[i - 1].t);
+        out.push({ W, dum: dums.map((e) => e.t), first: r.events[0].t, last: r.events[r.events.length - 1].t, gap, firstTick: ticks[0].t, BEAT }); }
+      const r30 = S.cueScore(30); out.push({ W: 'base', skip: r30.skip, reps: r30.reps, first: r30.events.find((e) => e.k === 'mar').f });
+      return out; });
+    sc.forEach((x) => {
+      if (x.W === 'base') { if (x.skip !== 0 || x.reps !== 1 || Math.abs(x.first - 523.25) > 0.1) F('CUE: 30 s is not the whole cue as previewed (skip ' + x.skip + ', reps ' + x.reps + ')'); return; }
+      if (x.dum.length !== 1 || Math.abs(x.dum[0] - x.W) > 1e-6) F('CUE: a ' + x.W + ' s window does not land its DUM on zero (' + x.dum.join(',') + ')');
+      if (x.first < -1e-9 || x.last > x.W + 1e-6) F('CUE: a ' + x.W + ' s window plays notes outside the window');
+      if (x.gap > x.BEAT + 1e-6 || x.firstTick > x.BEAT + 1e-6) F('CUE: a ' + x.W + ' s window drops the clock tick somewhere');
+    });
+
+    /* CUE in the game: 5 seconds to answer, a buzz, and the clock runs out */
+    await toBoard(); await p.locator('[data-act="settings"]').first().click();
+    await p.locator('#setSecs').fill('5'); await p.getByRole('button', { name: /^Save/ }).first().click(); await p.waitForTimeout(300);
+    await p.evaluate(() => { const S = window.FACEOFF_SOUND; window.__cues = []; window.__dum = []; const c = S.cue.bind(S), n = S._cueNote.bind(S);
+      S.cue = (x) => { window.__cues.push(x); return c(x); }; S._cueNote = (bed, e, at) => { if (e.dum) window.__dum.push(at - bed.t0); return n(bed, e, at); }; });
+    await p.locator('[data-act="start"]').first().click().catch(() => {}); await p.waitForTimeout(300);
+    await openAndBuzz();
+    const cueOn = await p.evaluate(() => { const b = window.FACEOFF_SOUND._bed; return !!b && !b.el && b.ev.length > 0; });
+    if (!cueOn) F('CUE: a buzz with no music loaded does not play the think cue');
+    await p.waitForTimeout(5600);
+    const end = await p.evaluate(() => ({ cues: window.__cues.slice(), dum: window.__dum.slice(), bed: !!window.FACEOFF_SOUND._bed }));
+    if (end.dum.length !== 1 || Math.abs(end.dum[0] - 5) > 0.05) F('CUE: the DUM did not sound at zero in the game (' + end.dum.join(',') + ')');
+    if (end.cues.indexOf('timeUp') >= 0) F('RING: the falling time\'s-up sound played over the DUM');
+    if (end.bed) F('RING: the cue is still running after the clock ran out');
+    /* judged before zero: it stops at once, it does not ring */
+    await toBoard(); await p.locator('[data-act="settings"]').first().click();
+    await p.locator('#setSecs').fill('20'); await p.getByRole('button', { name: /^Save/ }).first().click(); await p.waitForTimeout(300);
+    await openAndBuzz(); await p.waitForTimeout(800);
+    const gate = await p.evaluate(() => { window.__gate = window.FACEOFF_SOUND._bed && window.FACEOFF_SOUND._bed.gate; return !!window.__gate; });
+    await p.keyboard.press('y'); await p.waitForTimeout(250);
+    const g = await p.evaluate(() => window.__gate ? window.__gate.gain.value : 1);
+    if (!gate) F('RING: no cue was playing to judge (the buzz did not start it)'); else if (g > 0.01) F('RING: judging the answer did not stop the cue at once (gate ' + g + ')');
+  } catch (e) { F('DRIVE: ' + String(e.message).split('\n')[0]); if (process.env.SHOT && pg) await pg.screenshot({ path: process.env.SHOT }).catch(() => {}); }
   finally { await B.close(); s.close(); }
   return fails;
 }
@@ -135,12 +181,16 @@ const PLANTS = [
   ['STOP', 'stopping the clock leaves the music playing', { 'app.js': [['setTimeout(function () { if (Snd._bed && Snd._bed.el === el) return; el.pause(); }, 90);', '']] }],
   ['KEPT', 'the file is never saved in the browser', { 'app.js': [['MusicStore.save(f, f.name).catch(', 'Promise.resolve().catch(']] }],
   ['LOAD', 'loading the music redraws the whole form', { 'app.js': [["flash('Answer music loaded: ' + f.name + ' (' + Math.round(secs) + ' s)'); paintClipRow();", "flash('Answer music loaded'); render();"]] }],
-  ['REMOVE', 'Remove forgets to clear the browser copy', { 'app.js': [["Snd.clipClear(); MusicStore.clear();", 'Snd.clipClear();']] }]
+  ['REMOVE', 'Remove forgets to clear the browser copy', { 'app.js': [["Snd.clipClear(); MusicStore.clear();", 'Snd.clipClear();']] }],
+  ['CUE', 'the cue always starts from its top, so short windows end early', { 'app.js': [['var total = order.length * BAR, skip = total - secs, ev = [];', 'var total = order.length * BAR, skip = 0, ev = [];']] }],
+  ['CUE', 'the middle is never repeated, so long windows go quiet', { 'app.js': [['var reps = Math.max(1, Math.ceil((secs - 15) / 15));', 'var reps = 1;']] }],
+  ['RING', "the time's-up sound still plays over the DUM", { 'app.js': [["if (!landed) Snd.cue('timeUp');", "Snd.cue('timeUp');"]] }],
+  ['RING', 'every stop rings out, even when judged early', { 'app.js': [['var ring = !!(c && bed.dumAt && c.currentTime >= bed.dumAt - 0.15);', 'var ring = !!(c && bed.dumAt);']] }]
 ];
 
 if (!process.argv.includes('--plant')) {
   const f = await run(null); f.forEach((x) => console.log('FAIL ' + x));
-  console.log(f.length ? f.length + ' failure(s)' : 'PASS — answer music: plan, load, kept, buzz, stop, remove');
+  console.log(f.length ? f.length + ' failure(s)' : 'PASS — answer music: plan, load, kept, buzz, stop, remove; think cue: cue, ring');
   process.exit(f.length ? 1 : 0);
 } else {
   let bad = 0;
