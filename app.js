@@ -31,41 +31,10 @@ function clone(o) { return JSON.parse(JSON.stringify(o)); }
 function fmt(n) { return (n < 0 ? '-' : '') + Math.abs(n).toLocaleString(); }
 function lsGet(k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
-/* The host's answer music, kept in THIS browser (IndexedDB) and never
-   uploaded. One store for every Face-Off game on purpose: they share the
-   github.io origin, so loading it once in one game loads it in all five. */
-/* The answer-music row of Game settings. Repainted on its own when a
-   file is loaded or removed, so the rest of the unsaved form survives. */
-function clipRowHtml() {
-  return '<div class="row" style="gap:12px;margin-top:12px;align-items:center;flex-wrap:wrap" id="clipRow">' +
-'<span><b>Answer music:</b> ' + (Snd.clipReady()
-? '<span id="clipName">' + esc(Snd.clipName) + '</span> (' + Math.round(Snd.clipDur) + ' s)'
-: '<span id="clipName">none loaded</span> — the built-in countdown plays') + '</span>' +
-'<button class="btn" data-act="clippick" type="button">Load answer music…</button>' +
-'<input id="setClip" type="file" accept="audio/*" hidden>' +
-(Snd.clipReady() ? '<button class="btn" data-act="clipclear" type="button">Remove</button>' : '') +
-'</div>';
-}
-function paintClipRow() { var r = document.getElementById('clipRow'); if (r) r.outerHTML = clipRowHtml(); }
-var MusicStore = {
-  _db: function () {
-    return new Promise(function (ok, no) {
-      if (!window.indexedDB) { no(new Error('no IndexedDB')); return; }
-      var r = indexedDB.open('fo-answer-music', 1);
-      r.onupgradeneeded = function () { r.result.createObjectStore('music'); };
-      r.onsuccess = function () { ok(r.result); }; r.onerror = function () { no(r.error); };
-    });
-  },
-  _tx: function (mode, fn) {
-    return this._db().then(function (db) { return new Promise(function (ok, no) {
-      var t = db.transaction('music', mode), st = t.objectStore('music'), req = fn(st);
-      t.oncomplete = function () { ok(req && req.result); db.close(); }; t.onerror = function () { no(t.error); db.close(); };
-    }); });
-  },
-  load: function () { return this._tx('readonly', function (st) { return st.get('answer'); }).catch(function () { return null; }); },
-  save: function (blob, name) { return this._tx('readwrite', function (st) { return st.put({ blob: blob, name: name }, 'answer'); }); },
-  clear: function () { return this._tx('readwrite', function (st) { return st.delete('answer'); }).catch(function () {}); }
-};
+/* Load-your-own answer music was taken out (owner, 9 October 2026): the
+   Face Off think cue is the only answer music. Clear any copy a host
+   loaded while the button existed, so no file is left in the browser. */
+try { if (window.indexedDB) indexedDB.deleteDatabase('fo-answer-music'); } catch (e) {}
 /* per-TAB identity: two tabs on one machine = two different players,
    and a refresh keeps you in your seat */
 function ssGet(k, d) { try { var v = sessionStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
@@ -442,7 +411,6 @@ var Snd = {
          (45 s plays it twice, 120 s seven times)
        - it then starts part way in, so the DUM lands on zero: 15
          seconds to answer begins at bar 9 (cueScore)
-     A file the host loads (below) plays instead, when there is one.
      ================================================================== */
   CUE_BPM: 128,
 
@@ -482,99 +450,11 @@ var Snd = {
     return { events: ev, total: total, skip: skip, reps: reps, dumAt: secs };
   },
 
-  /* ==================================================================
-     ANSWER MUSIC THE HOST LOADS (owner, 7 October 2026)
-
-     The owner wanted a recorded think cue to start on the buzzer. A
-     recording of a TV show's cue is somebody else's property, so it
-     never goes in this public repo: the host loads the file on their
-     own computer (Game settings → Load answer music…), it is kept in
-     that browser's IndexedDB, and it is never uploaded anywhere. With
-     none loaded, the Face Off think cue above plays.
-
-     It still has ONE owner, the answer clock: bedStart plays it and
-     bedStop stops it, so every way a clue ends stops the music.
-
-     It STRETCHES to the host's seconds-to-answer, ending as the clock
-     hits zero (clipPlan):
-       - a window up to the clip's length: the clip's last N seconds,
-         or the whole clip a little faster (at most 1.25x)
-       - a longer window: the clip slowed (pitch kept), or played
-         through 2, 3 or 4 times at 0.67x to 1.33x, so the last pass
-         ends on zero
-     ================================================================== */
-  clipName: '', clipDur: 0, _clipEl: null, _clipSrc: null, _clipUrl: null,
-
-  /** How to fit a clip of L seconds into a W-second window: start at
-      `offset` seconds, play `passes` times at `rate`. Pure, so it can
-      be checked without a browser. */
-  clipPlan: function (L, W) {
-    L = Number(L) || 0; W = Math.max(1, Number(W) || 0);
-    if (!L) return null;
-    if (W <= L) {
-      if (L / W <= 1.25) return { offset: 0, rate: L / W, passes: 1 };
-      return { offset: L - W, rate: 1, passes: 1 };
-    }
-    var n = Math.max(1, Math.round(W / L)), rate = n * L / W;
-    if (rate < 0.67) { n++; rate = n * L / W; }
-    return { offset: 0, rate: rate, passes: n };
-  },
-
-  /** Take a loaded file (a Blob) as the answer music. Resolves with its
-      length in seconds, or rejects if the browser can't play it. */
-  clipSet: function (blob, name) {
-    var self = this;
-    this.clipClear();
-    return new Promise(function (ok, no) {
-      var el = new Audio(); el.preload = 'auto';
-      /* slowed or sped up, it keeps its pitch rather than sounding like
-         a tape at the wrong speed */
-      el.preservesPitch = true; el.mozPreservesPitch = true; el.webkitPreservesPitch = true;
-      var url = URL.createObjectURL(blob);
-      el.addEventListener('loadedmetadata', function () {
-        if (!isFinite(el.duration) || el.duration <= 0) { URL.revokeObjectURL(url); no(new Error('no length')); return; }
-        self._clipEl = el; self._clipUrl = url; self.clipName = name || 'answer music'; self.clipDur = el.duration;
-        ok(el.duration);
-      }, { once: true });
-      el.addEventListener('error', function () { URL.revokeObjectURL(url); no(new Error('unplayable')); }, { once: true });
-      el.src = url;
-    });
-  },
-  clipClear: function () {
-    if (this._bed && this._bed.el) this.bedStop();
-    if (this._clipSrc) { try { this._clipSrc.disconnect(); } catch (e) {} }
-    if (this._clipEl) { try { this._clipEl.pause(); } catch (e) {} }
-    if (this._clipUrl) URL.revokeObjectURL(this._clipUrl);
-    this._clipEl = null; this._clipSrc = null; this._clipUrl = null; this.clipName = ''; this.clipDur = 0;
-  },
-  clipReady: function () { return !!(this._clipEl && this.clipDur); },
-
-  _clipStart: function (secs) {
-    var c = this.ac(); if (!c) return false;
-    var el = this._clipEl, plan = this.clipPlan(this.clipDur, secs);
-    var gate = c.createGain(); gate.gain.value = 1; gate.connect(this.musicBus);
-    /* a media element can be routed into the context only once */
-    if (!this._clipSrc) this._clipSrc = c.createMediaElementSource(el);
-    try { this._clipSrc.disconnect(); } catch (e) {}
-    this._clipSrc.connect(gate);
-    var bed = { gate: gate, nodes: [], timer: null, el: el, plan: plan, pass: 1, total: secs };
-    this._bed = bed;
-    el.onended = function () {
-      if (bed !== Snd._bed || bed.pass >= plan.passes) return;
-      bed.pass++; el.currentTime = 0; el.play().catch(function () {});
-    };
-    el.playbackRate = plan.rate;
-    el.currentTime = plan.offset;
-    el.play().catch(function () {});
-    return true;
-  },
-
   bedStart: function (secs) {
     this.bedStop();                       /* one bed, ever. */
     if (!this.on || !this.music) return false;
     var c = this.ac(); if (!c) return false;
     secs = Math.max(1, Number(secs) || 0);
-    if (this.clipReady()) return this._clipStart(secs);
 
     var t0 = c.currentTime + 0.03;
     var gate = c.createGain();            /* one handle to kill the lot */
@@ -639,8 +519,6 @@ var Snd = {
     this._bed = null;
     if (!bed) return false;
     if (bed.timer) clearInterval(bed.timer);
-    /* the loaded answer music: pause it just after the gate has faded */
-    if (bed.el) { var el = bed.el; el.onended = null; setTimeout(function () { if (Snd._bed && Snd._bed.el === el) return; el.pause(); }, 90); }
     var c = this.ctx;
     /* The clock ran out on the cue's DUM: let it ring out, don't cut it */
     var ring = !!(c && bed.dumAt && c.currentTime >= bed.dumAt - 0.15);
@@ -1518,10 +1396,6 @@ function Host(forcedCode) {
   Snd.on = S.settings.sound;
   Snd.music = S.settings.music !== false;      /* older saved settings predate it */
   Snd.setVolume(S.settings.volume == null ? 0.7 : S.settings.volume);
-  /* the host's own answer music, if they loaded one on this computer */
-  MusicStore.load().then(function (r) {
-    if (r && r.blob) Snd.clipSet(r.blob, r.name).then(paintClipRow, function () {});
-  });
 
   function makeTeams(n) {
     var old = S.teams.slice();
@@ -2778,12 +2652,6 @@ function Host(forcedCode) {
         '</div>' +
         '<div style="margin-top:8px;font-size:13px">Turning the music off leaves a plain tick on the last five seconds, ' +
           'so the clock is never silent. The game\'s own sounds are generated in the browser.</div>' +
-        /* the host's own think music: starts on the buzzer, stretched to
-           the seconds to answer, kept on this computer only */
-        clipRowHtml() +
-        '<div style="margin-top:6px;font-size:13px">It starts the moment a team buzzes and is stretched to fit the ' +
-          'seconds to answer, ending as the clock hits zero. The file stays in this browser on this computer: ' +
-          'it is never uploaded, and it works in every Face Off game here.</div>' +
       '</div>' +
       '<div class="notice" style="margin-top:13px">' +
         '<b>Room:</b> ' + (S.settings.teamCount * S.settings.teamSize) + ' students (' +
@@ -2997,10 +2865,6 @@ function Host(forcedCode) {
         if ($('#setClsA')) S.settings.classA = ($('#setClsA').value || 'CLASS A').slice(0, 18);
         if ($('#setClsB')) S.settings.classB = ($('#setClsB').value || 'CLASS B').slice(0, 18);
         makeTeams(S.settings.teamCount); persist(); S.settingsOpen = false; sync(); break;
-      case 'clippick':
-        var fi = $('#setClip'); if (fi) { fi.value = ''; fi.click(); } break;
-      case 'clipclear':
-        Snd.clipClear(); MusicStore.clear(); flash('Answer music removed: the built-in countdown plays'); paintClipRow(); break;
       case 'testsnd':
         /* Tests what is ON SCREEN, not what was last saved, so dragging
            the slider and pressing Test does what the host expects. */
@@ -3075,14 +2939,6 @@ function Host(forcedCode) {
      choice and the new one both looked selected — on a projector, in front
      of a class, with no way to tell which one the game would actually use. */
   app.addEventListener('change', function (e) {
-    if (e.target.id === 'setClip') {
-      var f = e.target.files && e.target.files[0]; if (!f) return;
-      Snd.clipSet(f, f.name).then(function (secs) {
-        MusicStore.save(f, f.name).catch(function () { flash('Loaded, but this browser would not keep it for next time', 'bad'); });
-        flash('Answer music loaded: ' + f.name + ' (' + Math.round(secs) + ' s)'); paintClipRow();
-      }, function () { flash('That file could not be played. Try an MP3 or WAV.', 'bad'); });
-      return;
-    }
     if (e.target.name !== 'gstyle') return;
     var picks = document.querySelectorAll('.stylepick');
     for (var i = 0; i < picks.length; i++) {
